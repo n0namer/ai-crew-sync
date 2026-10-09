@@ -1,0 +1,3 @@
+# SQLx validates migration file bytes against checksums stored in PostgreSQL.
+# Keep historical and future migrations on canonical LF, including Windows checkouts.
+migrations/*.sql text eol=lf

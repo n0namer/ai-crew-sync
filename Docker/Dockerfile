@@ -18,6 +18,9 @@ RUN mkdir -p src && \
 
 COPY src ./src
 COPY migrations ./migrations
+# SQLx validates migration byte checksums. Windows checkout CRLF must not alter
+# the canonical LF migration bytes embedded in the release binary.
+RUN for file in migrations/*.sql; do sed -i 's/\r$//' "$file"; done
 # The recipes are compiler inputs (`include_str!` in src/recipes.rs): the
 # build fails without them, whatever the checkout looked like.
 COPY recipes ./recipes
