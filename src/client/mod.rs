@@ -444,13 +444,22 @@ async fn run_command(
 
     let arguments: serde_json::Map<String, Value> =
         serde_json::from_value(call_args).context("arguments did not form a JSON object")?;
-    let mut value = if matches!(&args.command, ClientCmd::Tasks { all_pages: true, .. }) {
+    let mut value = if matches!(
+        &args.command,
+        ClientCmd::Tasks {
+            all_pages: true,
+            ..
+        }
+    ) {
         fetch_all_task_pages(client, &tool, arguments).await?
     } else {
         call_tool_value(client, &tool, arguments).await?
     };
 
-    if let ClientCmd::Tasks { all_pages: false, .. } = &args.command {
+    if let ClientCmd::Tasks {
+        all_pages: false, ..
+    } = &args.command
+    {
         let (incomplete, exhausted) = task_page_state(&value);
         add_task_pagination_metadata(&mut value, incomplete, exhausted);
     }

@@ -1,6 +1,6 @@
 use ai_crew_sync::store::task_cursor::{
-    decode_cursor_at, encode_cursor_with_lifetime, CursorError, CursorLifetime,
-    TaskCursorContext, TaskCursorFilters, TaskOrder,
+    CursorError, CursorLifetime, TaskCursorContext, TaskCursorFilters, TaskOrder, decode_cursor_at,
+    encode_cursor_with_lifetime,
 };
 
 const SECRET: &[u8] = b"integration-test-signing-secret";
@@ -36,7 +36,11 @@ fn signed_cursor_is_publicly_reachable_and_binds_team_and_filters() {
 
     let mut tampered = token.into_bytes();
     let signature_byte = tampered.len() - 1;
-    tampered[signature_byte] = if tampered[signature_byte] == b'A' { b'B' } else { b'A' };
+    tampered[signature_byte] = if tampered[signature_byte] == b'A' {
+        b'B'
+    } else {
+        b'A'
+    };
     let tampered = String::from_utf8(tampered).unwrap();
     assert_eq!(
         decode_cursor_at(SECRET, &tampered, &context(), 15_000),
@@ -162,7 +166,9 @@ fn status_rank_order_is_total_and_keyset_boundary_is_strict() {
     rows.sort_by(TaskOrder::cmp_key);
 
     assert_eq!(
-        rows.iter().map(|row| row.task_key.as_str()).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|row| row.task_key.as_str())
+            .collect::<Vec<_>>(),
         vec![
             "team-alpha:task-a",
             "team-alpha:task-c",
@@ -183,9 +189,11 @@ fn status_rank_order_is_total_and_keyset_boundary_is_strict() {
             .collect::<Vec<_>>(),
         vec!["team-alpha:task-z", "team-alpha:task-b"]
     );
-    assert!(!continuation
-        .iter()
-        .any(|row| row.task_key == boundary.task_key));
+    assert!(
+        !continuation
+            .iter()
+            .any(|row| row.task_key == boundary.task_key)
+    );
 }
 
 fn token_for_test() -> String {

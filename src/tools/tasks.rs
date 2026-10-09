@@ -42,13 +42,19 @@ fn validate_search_args(args: &ListTasksArgs) -> Result<(), ErrorData> {
             None,
         ));
     }
-    if !matches!(args.search_fields.as_str(), "title" | "description" | "both") {
+    if !matches!(
+        args.search_fields.as_str(),
+        "title" | "description" | "both"
+    ) {
         return Err(ErrorData::invalid_params(
             "search_fields must be one of: title, description, both",
             None,
         ));
     }
-    if !matches!(args.search_language.as_str(), "simple" | "english" | "russian") {
+    if !matches!(
+        args.search_language.as_str(),
+        "simple" | "english" | "russian"
+    ) {
         return Err(ErrorData::invalid_params(
             "search_language must be one of: simple, english, russian",
             None,
@@ -301,10 +307,9 @@ mod tests {
 
     #[test]
     fn legacy_list_arguments_default_pagination_filters() {
-        let args: ListTasksArgs = serde_json::from_str(
-            r#"{"status":"open","mine_only":true,"limit":25}"#,
-        )
-        .expect("legacy task-list arguments should remain valid");
+        let args: ListTasksArgs =
+            serde_json::from_str(r#"{"status":"open","mine_only":true,"limit":25}"#)
+                .expect("legacy task-list arguments should remain valid");
 
         assert_eq!(args.status.as_deref(), Some("open"));
         assert!(args.mine_only);
@@ -351,10 +356,9 @@ mod tests {
 
     #[test]
     fn search_options_reject_unknown_values_only_for_nonempty_search() {
-        let mut args: ListTasksArgs = serde_json::from_str(
-            r#"{"search":"term","search_mode":"wildcard"}"#,
-        )
-        .expect("search task-list arguments should deserialize");
+        let mut args: ListTasksArgs =
+            serde_json::from_str(r#"{"search":"term","search_mode":"wildcard"}"#)
+                .expect("search task-list arguments should deserialize");
         assert!(validate_search_args(&args).is_err());
 
         args.search = Some("   ".to_owned());
@@ -364,10 +368,9 @@ mod tests {
 
     #[test]
     fn paged_list_arguments_accept_prefix_and_cursor() {
-        let args: ListTasksArgs = serde_json::from_str(
-            r#"{"project_prefix":"api#","cursor":"opaque-token"}"#,
-        )
-        .expect("paged task-list arguments should deserialize");
+        let args: ListTasksArgs =
+            serde_json::from_str(r#"{"project_prefix":"api#","cursor":"opaque-token"}"#)
+                .expect("paged task-list arguments should deserialize");
 
         assert_eq!(args.project_prefix.as_deref(), Some("api#"));
         assert_eq!(args.cursor.as_deref(), Some("opaque-token"));

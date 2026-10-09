@@ -87,9 +87,14 @@ async fn complete_in_parallel(
             tasks::claim_task(&pool, &auth, &key, Some(60))
                 .await
                 .map_err(|error| error.to_string())?;
-            tasks::complete_task(&pool, &auth, &key, Some("completed by parallel worker".to_owned()))
-                .await
-                .map_err(|error| error.to_string())?;
+            tasks::complete_task(
+                &pool,
+                &auth,
+                &key,
+                Some("completed by parallel worker".to_owned()),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             Ok::<(), String>(())
         });
     }
@@ -113,29 +118,25 @@ async fn set_same_timestamp(fixture: &Fixture) -> Result<(), sqlx::Error> {
 
 async fn add_foreign_team_task(fixture: &Fixture) -> Result<Uuid, sqlx::Error> {
     let mut tx = fixture.pool.begin().await?;
-    let team_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO teams (slug, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("pagination-foreign-{}", Uuid::new_v4().simple()))
-    .bind("foreign pagination team")
-    .fetch_one(&mut *tx)
-    .await?;
-    let agent_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO agents (team_id, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(team_id)
-    .bind("foreign-agent")
-    .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO tasks (team_id, key, title, created_by) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(team_id)
-    .bind(format!("{}:foreign", fixture.task_prefix))
-    .bind("must not cross the team ACL")
-    .bind(agent_id)
-    .execute(&mut *tx)
-    .await?;
+    let team_id: Uuid =
+        sqlx::query_scalar("INSERT INTO teams (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("pagination-foreign-{}", Uuid::new_v4().simple()))
+            .bind("foreign pagination team")
+            .fetch_one(&mut *tx)
+            .await?;
+    let agent_id: Uuid =
+        sqlx::query_scalar("INSERT INTO agents (team_id, name) VALUES ($1, $2) RETURNING id")
+            .bind(team_id)
+            .bind("foreign-agent")
+            .fetch_one(&mut *tx)
+            .await?;
+    sqlx::query("INSERT INTO tasks (team_id, key, title, created_by) VALUES ($1, $2, $3, $4)")
+        .bind(team_id)
+        .bind(format!("{}:foreign", fixture.task_prefix))
+        .bind("must not cross the team ACL")
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(team_id)
 }
@@ -176,9 +177,7 @@ async fn run_real_client(
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await
-    });
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
 
     let command = ClientCmd::Tasks {
         status: None,
@@ -211,7 +210,12 @@ async fn run_real_client(
 
 async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = setup_fixture().await?;
-    let primary = auth(&fixture, fixture.agent_id, "fixture-primary", "pagination-worker");
+    let primary = auth(
+        &fixture,
+        fixture.agent_id,
+        "fixture-primary",
+        "pagination-worker",
+    );
     let secondary = auth(
         &fixture,
         fixture.other_agent_id,
@@ -321,43 +325,41 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
         let token = first.next_cursor.expect("first page has cursor");
         run_real_client(&fixture, &fixture.task_prefix, None, true).await?;
-        run_real_client(
-            &fixture,
-            &fixture.task_prefix,
-            Some(token.clone()),
-            false,
-        )
-        .await?;
+        run_real_client(&fixture, &fixture.task_prefix, Some(token.clone()), false).await?;
         let mut tampered = token.clone().into_bytes();
         let last = tampered.len() - 1;
         tampered[last] = if tampered[last] == b'A' { b'B' } else { b'A' };
         let tampered = String::from_utf8(tampered)?;
-        assert!(tasks::list_tasks_page(
-            &fixture.pool,
-            &primary,
-            TaskPageQuery {
-                status: None,
-                mine_only: false,
-                limit: 10,
-                project_prefix: Some(fixture.task_prefix.clone()),
-                cursor: Some(tampered),
-            },
-        )
-        .await
-        .is_err());
-        assert!(tasks::list_tasks_page(
-            &fixture.pool,
-            &primary,
-            TaskPageQuery {
-                status: Some("done".to_owned()),
-                mine_only: false,
-                limit: 10,
-                project_prefix: Some(fixture.task_prefix.clone()),
-                cursor: Some(token),
-            },
-        )
-        .await
-        .is_err());
+        assert!(
+            tasks::list_tasks_page(
+                &fixture.pool,
+                &primary,
+                TaskPageQuery {
+                    status: None,
+                    mine_only: false,
+                    limit: 10,
+                    project_prefix: Some(fixture.task_prefix.clone()),
+                    cursor: Some(tampered),
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tasks::list_tasks_page(
+                &fixture.pool,
+                &primary,
+                TaskPageQuery {
+                    status: Some("done".to_owned()),
+                    mine_only: false,
+                    limit: 10,
+                    project_prefix: Some(fixture.task_prefix.clone()),
+                    cursor: Some(token),
+                },
+            )
+            .await
+            .is_err()
+        );
 
         sqlx::query("DELETE FROM teams WHERE id = $1")
             .bind(foreign_team_id)

@@ -3,7 +3,7 @@
 //! This module is intentionally standalone. Integration with task storage and
 //! MCP/CLI layers belongs to the pagination integration barrier.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -95,7 +95,10 @@ impl TaskCursorFilters {
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
-    value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn normalize_choice(
@@ -131,12 +134,20 @@ impl TaskOrder {
     /// Compatibility constructor for callers that do not yet provide a rank.
     /// SQL integrations must use `from_sql` so rank is carried into the cursor.
     pub fn new(updated_at_micros: i64, task_key: impl Into<String>) -> Self {
-        Self { status_rank: 0, updated_at_micros, task_key: task_key.into() }
+        Self {
+            status_rank: 0,
+            updated_at_micros,
+            task_key: task_key.into(),
+        }
     }
 
     /// Constructor matching the SQL keyset tuple exactly.
     pub fn from_sql(status_rank: i32, updated_at_micros: i64, task_key: impl Into<String>) -> Self {
-        Self { status_rank, updated_at_micros, task_key: task_key.into() }
+        Self {
+            status_rank,
+            updated_at_micros,
+            task_key: task_key.into(),
+        }
     }
 
     pub fn cmp_key(&self, other: &Self) -> std::cmp::Ordering {
@@ -158,7 +169,10 @@ impl CursorLifetime {
         if issued_at > expires_at {
             return Err(CursorError::InvalidLifetime);
         }
-        Ok(Self { issued_at, expires_at })
+        Ok(Self {
+            issued_at,
+            expires_at,
+        })
     }
 }
 
@@ -251,7 +265,10 @@ pub fn encode_cursor(
         secret,
         context,
         order,
-        CursorLifetime { issued_at: 0, expires_at: i64::MAX },
+        CursorLifetime {
+            issued_at: 0,
+            expires_at: i64::MAX,
+        },
     )
 }
 
@@ -323,7 +340,10 @@ fn decode_cursor_internal(
     }
     Ok(DecodedTaskCursor {
         version: payload.version,
-        context: TaskCursorContext { team_id: payload.team_id, filters: payload_filters },
+        context: TaskCursorContext {
+            team_id: payload.team_id,
+            filters: payload_filters,
+        },
         order: payload.order,
         lifetime: payload.lifetime,
     })
@@ -397,7 +417,10 @@ mod tests {
     }
 
     fn context() -> TaskCursorContext {
-        TaskCursorContext { team_id: "team-a".into(), filters: filters() }
+        TaskCursorContext {
+            team_id: "team-a".into(),
+            filters: filters(),
+        }
     }
 
     fn lifetime() -> CursorLifetime {
@@ -407,7 +430,8 @@ mod tests {
     #[test]
     fn round_trip_preserves_rank_binding_tuple_and_lifetime() {
         let order = TaskOrder::from_sql(3, 42, "team-a:project:task-7");
-        let token = encode_cursor_with_lifetime(b"server-secret", &context(), &order, lifetime()).unwrap();
+        let token =
+            encode_cursor_with_lifetime(b"server-secret", &context(), &order, lifetime()).unwrap();
         let decoded = decode_cursor_at(b"server-secret", &token, &context(), 1_500).unwrap();
         assert_eq!(decoded.version, CURSOR_VERSION);
         assert_eq!(decoded.context, context());
@@ -417,7 +441,8 @@ mod tests {
 
     #[test]
     fn absent_search_keeps_legacy_filter_shape_and_defaults() {
-        let token = encode_cursor(b"secret", &context(), &TaskOrder::new(1, "team-a:task:t")).unwrap();
+        let token =
+            encode_cursor(b"secret", &context(), &TaskOrder::new(1, "team-a:task:t")).unwrap();
         let decoded = decode_cursor(b"secret", &token, &context()).unwrap();
         assert_eq!(decoded.context.filters.search, None);
         assert_eq!(decoded.context.filters.search_mode, None);
@@ -432,12 +457,25 @@ mod tests {
         requested.filters.search_mode = Some(" CONTAINS ".into());
         requested.filters.search_fields = Some(" TITLE ".into());
         requested.filters.search_language = Some(" ENGLISH ".into());
-        let token = encode_cursor(b"secret", &requested, &TaskOrder::new(1, "team-a:task:t")).unwrap();
+        let token =
+            encode_cursor(b"secret", &requested, &TaskOrder::new(1, "team-a:task:t")).unwrap();
         let decoded = decode_cursor(b"secret", &token, &requested).unwrap();
-        assert_eq!(decoded.context.filters.search.as_deref(), Some("Mixed Case"));
-        assert_eq!(decoded.context.filters.search_mode.as_deref(), Some("contains"));
-        assert_eq!(decoded.context.filters.search_fields.as_deref(), Some("title"));
-        assert_eq!(decoded.context.filters.search_language.as_deref(), Some("english"));
+        assert_eq!(
+            decoded.context.filters.search.as_deref(),
+            Some("Mixed Case")
+        );
+        assert_eq!(
+            decoded.context.filters.search_mode.as_deref(),
+            Some("contains")
+        );
+        assert_eq!(
+            decoded.context.filters.search_fields.as_deref(),
+            Some("title")
+        );
+        assert_eq!(
+            decoded.context.filters.search_language.as_deref(),
+            Some("english")
+        );
 
         let mut canonical = context();
         canonical.filters.search = Some("Mixed Case".into());
@@ -451,7 +489,8 @@ mod tests {
     fn every_search_option_mismatch_rejects_replay() {
         let mut requested = context();
         requested.filters.search = Some("alpha beta".into());
-        let token = encode_cursor(b"secret", &requested, &TaskOrder::new(1, "team-a:task:t")).unwrap();
+        let token =
+            encode_cursor(b"secret", &requested, &TaskOrder::new(1, "team-a:task:t")).unwrap();
         for change in [
             (Some("different"), None, None, None),
             (None, Some("contains"), None, None),
@@ -459,11 +498,22 @@ mod tests {
             (None, None, None, Some("english")),
         ] {
             let mut replay = requested.clone();
-            if let Some(value) = change.0 { replay.filters.search = Some(value.into()); }
-            if let Some(value) = change.1 { replay.filters.search_mode = Some(value.into()); }
-            if let Some(value) = change.2 { replay.filters.search_fields = Some(value.into()); }
-            if let Some(value) = change.3 { replay.filters.search_language = Some(value.into()); }
-            assert_eq!(decode_cursor(b"secret", &token, &replay), Err(CursorError::ContextMismatch));
+            if let Some(value) = change.0 {
+                replay.filters.search = Some(value.into());
+            }
+            if let Some(value) = change.1 {
+                replay.filters.search_mode = Some(value.into());
+            }
+            if let Some(value) = change.2 {
+                replay.filters.search_fields = Some(value.into());
+            }
+            if let Some(value) = change.3 {
+                replay.filters.search_language = Some(value.into());
+            }
+            assert_eq!(
+                decode_cursor(b"secret", &token, &replay),
+                Err(CursorError::ContextMismatch)
+            );
         }
     }
 
@@ -472,45 +522,101 @@ mod tests {
         let mut invalid = context();
         invalid.filters.search = Some("alpha".into());
         invalid.filters.search_mode = Some("unknown".into());
-        assert_eq!(encode_cursor(b"secret", &invalid, &TaskOrder::new(1, "task")), Err(CursorError::InvalidSearchOptions));
+        assert_eq!(
+            encode_cursor(b"secret", &invalid, &TaskOrder::new(1, "task")),
+            Err(CursorError::InvalidSearchOptions)
+        );
 
         let mut dangling = context();
         dangling.filters.search_mode = Some("contains".into());
-        assert_eq!(encode_cursor(b"secret", &dangling, &TaskOrder::new(1, "task")), Err(CursorError::InvalidSearchOptions));
+        assert_eq!(
+            encode_cursor(b"secret", &dangling, &TaskOrder::new(1, "task")),
+            Err(CursorError::InvalidSearchOptions)
+        );
     }
 
     #[test]
     fn tampering_wrong_secret_team_and_legacy_filters_are_rejected() {
-        let token = encode_cursor_with_lifetime(b"secret", &context(), &TaskOrder::from_sql(2, 1, "team-a:task:t"), lifetime()).unwrap();
+        let token = encode_cursor_with_lifetime(
+            b"secret",
+            &context(),
+            &TaskOrder::from_sql(2, 1, "team-a:task:t"),
+            lifetime(),
+        )
+        .unwrap();
         let mut tampered = token.clone().into_bytes();
         let index = tampered.len() - 1;
         tampered[index] = if tampered[index] == b'A' { b'B' } else { b'A' };
-        assert_eq!(decode_cursor_at(b"secret", &String::from_utf8(tampered).unwrap(), &context(), 1_500), Err(CursorError::InvalidSignature));
-        assert_eq!(decode_cursor_at(b"other", &token, &context(), 1_500), Err(CursorError::InvalidSignature));
+        assert_eq!(
+            decode_cursor_at(
+                b"secret",
+                &String::from_utf8(tampered).unwrap(),
+                &context(),
+                1_500
+            ),
+            Err(CursorError::InvalidSignature)
+        );
+        assert_eq!(
+            decode_cursor_at(b"other", &token, &context(), 1_500),
+            Err(CursorError::InvalidSignature)
+        );
         let mut wrong_team = context();
         wrong_team.team_id = "team-b".into();
-        assert_eq!(decode_cursor_at(b"secret", &token, &wrong_team, 1_500), Err(CursorError::ContextMismatch));
+        assert_eq!(
+            decode_cursor_at(b"secret", &token, &wrong_team, 1_500),
+            Err(CursorError::ContextMismatch)
+        );
         let mut wrong_filter = context();
         wrong_filter.filters.status = Some("claimed".into());
-        assert_eq!(decode_cursor_at(b"secret", &token, &wrong_filter, 1_500), Err(CursorError::ContextMismatch));
+        assert_eq!(
+            decode_cursor_at(b"secret", &token, &wrong_filter, 1_500),
+            Err(CursorError::ContextMismatch)
+        );
     }
 
     #[test]
     fn malformed_and_empty_fields_are_rejected() {
-        assert_eq!(decode_cursor(b"secret", "not-a-cursor", &context()), Err(CursorError::InvalidFormat));
-        assert_eq!(decode_cursor(b"secret", "!!!.!!!", &context()), Err(CursorError::InvalidEncoding));
-        assert_eq!(encode_cursor(b"", &context(), &TaskOrder::from_sql(0, 1, "team-a:task:t")), Err(CursorError::EmptySecret));
-        assert_eq!(encode_cursor(b"secret", &context(), &TaskOrder::from_sql(0, 1, "")), Err(CursorError::EmptyTaskKey));
-        assert_eq!(CursorLifetime::new(2_000, 1_000), Err(CursorError::InvalidLifetime));
+        assert_eq!(
+            decode_cursor(b"secret", "not-a-cursor", &context()),
+            Err(CursorError::InvalidFormat)
+        );
+        assert_eq!(
+            decode_cursor(b"secret", "!!!.!!!", &context()),
+            Err(CursorError::InvalidEncoding)
+        );
+        assert_eq!(
+            encode_cursor(b"", &context(), &TaskOrder::from_sql(0, 1, "team-a:task:t")),
+            Err(CursorError::EmptySecret)
+        );
+        assert_eq!(
+            encode_cursor(b"secret", &context(), &TaskOrder::from_sql(0, 1, "")),
+            Err(CursorError::EmptyTaskKey)
+        );
+        assert_eq!(
+            CursorLifetime::new(2_000, 1_000),
+            Err(CursorError::InvalidLifetime)
+        );
     }
 
     #[test]
     fn expiry_is_deterministic_with_strict_boundaries() {
-        let token = encode_cursor_with_lifetime(b"secret", &context(), &TaskOrder::from_sql(1, 1, "team-a:task:t"), lifetime()).unwrap();
-        assert_eq!(decode_cursor_at(b"secret", &token, &context(), 999), Err(CursorError::NotYetValid));
+        let token = encode_cursor_with_lifetime(
+            b"secret",
+            &context(),
+            &TaskOrder::from_sql(1, 1, "team-a:task:t"),
+            lifetime(),
+        )
+        .unwrap();
+        assert_eq!(
+            decode_cursor_at(b"secret", &token, &context(), 999),
+            Err(CursorError::NotYetValid)
+        );
         assert!(decode_cursor_at(b"secret", &token, &context(), 1_000).is_ok());
         assert!(decode_cursor_at(b"secret", &token, &context(), 1_999).is_ok());
-        assert_eq!(decode_cursor_at(b"secret", &token, &context(), 2_000), Err(CursorError::Expired));
+        assert_eq!(
+            decode_cursor_at(b"secret", &token, &context(), 2_000),
+            Err(CursorError::Expired)
+        );
     }
 
     #[test]
@@ -528,12 +634,21 @@ mod tests {
 
     #[test]
     fn version_tampering_is_rejected() {
-        let token = encode_cursor_with_lifetime(b"secret", &context(), &TaskOrder::from_sql(1, 1, "team-a:task:t"), lifetime()).unwrap();
+        let token = encode_cursor_with_lifetime(
+            b"secret",
+            &context(),
+            &TaskOrder::from_sql(1, 1, "team-a:task:t"),
+            lifetime(),
+        )
+        .unwrap();
         let (payload, signature) = token.split_once('.').unwrap();
         let mut bytes = URL_SAFE_NO_PAD.decode(payload).unwrap();
         let version_index = bytes.iter().position(|byte| *byte == b'1').unwrap();
         bytes[version_index] = b'2';
         let rewritten = format!("{}.{}", URL_SAFE_NO_PAD.encode(bytes), signature);
-        assert_eq!(decode_cursor(b"secret", &rewritten, &context()), Err(CursorError::InvalidSignature));
+        assert_eq!(
+            decode_cursor(b"secret", &rewritten, &context()),
+            Err(CursorError::InvalidSignature)
+        );
     }
 }

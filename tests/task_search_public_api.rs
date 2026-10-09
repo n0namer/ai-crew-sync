@@ -3,7 +3,10 @@
 #[path = "task_pagination_fixture.rs"]
 mod fixture;
 
-use std::{collections::HashSet, time::{Duration, Instant}};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use ai_crew_sync::{
     auth::AuthCtx,
@@ -26,7 +29,13 @@ fn auth(fixture: &Fixture, agent_id: Uuid, name: &str, session: &str) -> AuthCtx
     }
 }
 
-fn page(prefix: Option<&str>, status: Option<&str>, mine_only: bool, limit: i64, cursor: Option<String>) -> TaskPageQuery {
+fn page(
+    prefix: Option<&str>,
+    status: Option<&str>,
+    mine_only: bool,
+    limit: i64,
+    cursor: Option<String>,
+) -> TaskPageQuery {
     TaskPageQuery {
         status: status.map(str::to_owned),
         mine_only,
@@ -36,7 +45,12 @@ fn page(prefix: Option<&str>, status: Option<&str>, mine_only: bool, limit: i64,
     }
 }
 
-fn search(query: Option<&str>, mode: Option<&str>, fields: Option<&str>, language: Option<&str>) -> TaskSearchQuery {
+fn search(
+    query: Option<&str>,
+    mode: Option<&str>,
+    fields: Option<&str>,
+    language: Option<&str>,
+) -> TaskSearchQuery {
     TaskSearchQuery {
         search: query.map(str::to_owned),
         search_mode: mode.map(str::to_owned),
@@ -52,11 +66,15 @@ async fn seed(fixture: &Fixture) -> Result<(), sqlx::Error> {
         let (title, description) = match ordinal % 8 {
             0 => (
                 format!("Running deployment database search {ordinal:04}"),
-                Some(format!("English operator guide for the running service {ordinal:04}")),
+                Some(format!(
+                    "English operator guide for the running service {ordinal:04}"
+                )),
             ),
             1 => (
                 format!("Russian inventory task {ordinal:04}"),
-                Some(format!("Быстрые задачи проекта и поиск данных {ordinal:04}")),
+                Some(format!(
+                    "Быстрые задачи проекта и поиск данных {ordinal:04}"
+                )),
             ),
             2 => (
                 format!("Literal 100%_wildcard marker {ordinal:04}"),
@@ -107,20 +125,18 @@ async fn seed(fixture: &Fixture) -> Result<(), sqlx::Error> {
 
 async fn add_foreign_task(fixture: &Fixture) -> Result<Uuid, sqlx::Error> {
     let mut tx = fixture.pool.begin().await?;
-    let team_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO teams (slug, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("public-search-foreign-{}", Uuid::new_v4().simple()))
-    .bind("public search foreign team")
-    .fetch_one(&mut *tx)
-    .await?;
-    let agent_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO agents (team_id, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(team_id)
-    .bind("foreign-agent")
-    .fetch_one(&mut *tx)
-    .await?;
+    let team_id: Uuid =
+        sqlx::query_scalar("INSERT INTO teams (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("public-search-foreign-{}", Uuid::new_v4().simple()))
+            .bind("public search foreign team")
+            .fetch_one(&mut *tx)
+            .await?;
+    let agent_id: Uuid =
+        sqlx::query_scalar("INSERT INTO agents (team_id, name) VALUES ($1, $2) RETURNING id")
+            .bind(team_id)
+            .bind("foreign-agent")
+            .fetch_one(&mut *tx)
+            .await?;
     sqlx::query(
         "INSERT INTO tasks (team_id, key, title, description, created_by) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -152,8 +168,18 @@ async fn insert_long_regex_row(fixture: &Fixture) -> Result<(), sqlx::Error> {
 
 async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = setup_fixture().await?;
-    let primary = auth(&fixture, fixture.agent_id, "fixture-primary", "public-search-primary");
-    let secondary = auth(&fixture, fixture.other_agent_id, "fixture-secondary", "public-search-secondary");
+    let primary = auth(
+        &fixture,
+        fixture.agent_id,
+        "fixture-primary",
+        "public-search-primary",
+    );
+    let secondary = auth(
+        &fixture,
+        fixture.other_agent_id,
+        "fixture-secondary",
+        "public-search-secondary",
+    );
     let foreign_team_id = add_foreign_task(&fixture).await?;
     let result = async {
         seed(&fixture).await?;
@@ -163,53 +189,117 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), None, false, 50, None),
-            search(Some("deployment"), Some("contains"), Some("title"), Some("simple")),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(!title_hits.tasks.is_empty());
-        assert!(title_hits.tasks.iter().all(|task| task.title.to_ascii_lowercase().contains("deployment")));
+        assert!(title_hits
+            .tasks
+            .iter()
+            .all(|task| task.title.to_ascii_lowercase().contains("deployment")));
         assert_eq!(title_hits.open + title_hits.claimed, (LARGE_FIXTURE_SIZE + 1) as i64);
 
         let description_hits = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &secondary,
             page(Some(&fixture.task_prefix), None, false, 50, None),
-            search(Some("быстрый"), Some("keywords"), Some("description"), Some("russian")),
+            search(
+                Some("быстрый"),
+                Some("keywords"),
+                Some("description"),
+                Some("russian"),
+            ),
         )
         .await?;
         assert!(!description_hits.tasks.is_empty());
-        assert!(description_hits.tasks.iter().all(|task| task.description.as_deref().unwrap_or_default().contains("Быстрые")));
+        assert!(description_hits
+            .tasks
+            .iter()
+            .all(|task| task.description.as_deref().unwrap_or_default().contains("Быстрые")));
 
         let regex_hits = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), None, false, 50, None),
-            search(Some("DEPLOYMENT"), Some("regex"), Some("both"), Some("simple")),
+            search(
+                Some("DEPLOYMENT"),
+                Some("regex"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(!regex_hits.tasks.is_empty());
         assert!(regex_hits.tasks.iter().all(|task| {
             task.title.to_ascii_lowercase().contains("deployment")
-                || task.description.as_deref().unwrap_or_default().to_ascii_lowercase().contains("deployment")
+                || task
+                    .description
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .contains("deployment")
         }));
 
         let literal_hits = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), None, false, 50, None),
-            search(Some("100%_wildcard"), Some("contains"), Some("title"), Some("simple")),
+            search(
+                Some("100%_wildcard"),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(!literal_hits.tasks.is_empty());
-        assert!(literal_hits.tasks.iter().all(|task| task.title.contains("100%_wildcard")));
+        assert!(literal_hits
+            .tasks
+            .iter()
+            .all(|task| task.title.contains("100%_wildcard")));
 
         for invalid in [
-            search(Some("["), Some("regex"), Some("title"), Some("simple")),
-            search(Some("term"), Some("invalid"), Some("title"), Some("simple")),
-            search(Some("term"), Some("contains"), Some("invalid"), Some("simple")),
-            search(Some("term"), Some("keywords"), Some("title"), Some("invalid")),
-            search(Some(&"x".repeat(513)), Some("contains"), Some("title"), Some("simple")),
-            search(Some("a\0b"), Some("regex"), Some("title"), Some("simple")),
+            search(
+                Some("["),
+                Some("regex"),
+                Some("title"),
+                Some("simple"),
+            ),
+            search(
+                Some("term"),
+                Some("invalid"),
+                Some("title"),
+                Some("simple"),
+            ),
+            search(
+                Some("term"),
+                Some("contains"),
+                Some("invalid"),
+                Some("simple"),
+            ),
+            search(
+                Some("term"),
+                Some("keywords"),
+                Some("title"),
+                Some("invalid"),
+            ),
+            search(
+                Some(&"x".repeat(513)),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
+            search(
+                Some("a\0b"),
+                Some("regex"),
+                Some("title"),
+                Some("simple"),
+            ),
         ] {
             let error = tasks::list_tasks_page_with_search(
                 &fixture.pool,
@@ -230,7 +320,12 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
                 &fixture.pool,
                 &primary,
                 page(Some(&fixture.task_prefix), None, false, 10, None),
-                search(Some("^(a+)+$"), Some("regex"), Some("description"), Some("simple")),
+                search(
+                    Some("^(a+)+$"),
+                    Some("regex"),
+                    Some("description"),
+                    Some("simple"),
+                ),
             ),
         )
         .await
@@ -238,23 +333,43 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
         assert!(timeout_start.elapsed() < Duration::from_secs(2));
         match pathological {
             Ok(result) => assert!(result.tasks.len() <= 10),
-            Err(error) => assert!(error.to_string().contains("250ms"), "unsafe timeout mapping: {error}"),
+            Err(error) => assert!(
+                error.to_string().contains("250ms"),
+                "unsafe timeout mapping: {error}"
+            ),
         }
 
         let first_page = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), None, false, 25, None),
-            search(Some("task"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("task"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
-        let cursor = first_page.next_cursor.clone().expect("bounded search page must expose a cursor");
-        let mut seen = first_page.tasks.iter().map(|task| task.key.clone()).collect::<HashSet<_>>();
+        let cursor = first_page
+            .next_cursor
+            .clone()
+            .expect("bounded search page must expose a cursor");
+        let mut seen = first_page
+            .tasks
+            .iter()
+            .map(|task| task.key.clone())
+            .collect::<HashSet<_>>();
         let second_page = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), None, false, 25, Some(cursor.clone())),
-            search(Some("task"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("task"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         for task in &second_page.tasks {
@@ -263,10 +378,30 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(seen.len(), 50);
 
         for altered in [
-            search(Some("deployment"), Some("contains"), Some("both"), Some("simple")),
-            search(Some("task"), Some("regex"), Some("both"), Some("simple")),
-            search(Some("task"), Some("contains"), Some("title"), Some("simple")),
-            search(Some("task"), Some("contains"), Some("both"), Some("english")),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
+            search(
+                Some("task"),
+                Some("regex"),
+                Some("both"),
+                Some("simple"),
+            ),
+            search(
+                Some("task"),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
+            search(
+                Some("task"),
+                Some("contains"),
+                Some("both"),
+                Some("english"),
+            ),
         ] {
             assert!(tasks::list_tasks_page_with_search(
                 &fixture.pool,
@@ -275,7 +410,9 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
                 altered,
             )
             .await
-            .is_err(), "cursor must bind every search option");
+            .is_err(),
+                "cursor must bind every search option"
+            );
         }
 
         sqlx::query(
@@ -292,10 +429,21 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), None, false, 25, Some(cursor)),
-            search(Some("task"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("task"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
-        assert!(live_page.tasks.iter().any(|task| task.key.ends_with(":0025.5")), "cursor is live-inventory, not a snapshot");
+        assert!(
+            live_page
+                .tasks
+                .iter()
+                .any(|task| task.key.ends_with(":0025.5")),
+            "cursor is live-inventory, not a snapshot"
+        );
 
         let empty = tasks::list_tasks_page_with_search(
             &fixture.pool,
@@ -310,15 +458,33 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
             page(Some(&fixture.task_prefix), None, false, 30, None),
         )
         .await?;
-        assert_eq!(empty.tasks.iter().map(|task| &task.key).collect::<Vec<_>>(), legacy.tasks.iter().map(|task| &task.key).collect::<Vec<_>>());
+        assert_eq!(
+            empty.tasks.iter().map(|task| &task.key).collect::<Vec<_>>(),
+            legacy
+                .tasks
+                .iter()
+                .map(|task| &task.key)
+                .collect::<Vec<_>>()
+        );
         assert_eq!((empty.open, empty.claimed), (legacy.open, legacy.claimed));
 
-        tasks::claim_task(&fixture.pool, &primary, &format!("{}:0000", fixture.task_prefix), Some(60)).await?;
+        tasks::claim_task(
+            &fixture.pool,
+            &primary,
+            &format!("{}:0000", fixture.task_prefix),
+            Some(60),
+        )
+        .await?;
         let mine = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page(Some(&fixture.task_prefix), Some("claimed"), true, 10, None),
-            search(Some("deployment"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert_eq!(mine.tasks.len(), 1);
@@ -328,12 +494,20 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
             &fixture.pool,
             &primary,
             page(None, None, false, 100, None),
-            search(Some("cross the team ACL"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("cross the team ACL"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(foreign_rows.tasks.is_empty(), "search must remain team-scoped");
 
-        sqlx::query("DELETE FROM teams WHERE id = $1").bind(foreign_team_id).execute(&fixture.pool).await?;
+        sqlx::query("DELETE FROM teams WHERE id = $1")
+            .bind(foreign_team_id)
+            .execute(&fixture.pool)
+            .await?;
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;
@@ -344,5 +518,7 @@ async fn run_public_api_matrix() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 #[ignore = "requires CREWSYNC_ENABLE_LARGE_FIXTURE=1 and disposable TEST_DATABASE_URL"]
 async fn public_task_search_api_safety_matrix() {
-    run_public_api_matrix().await.expect("public task search API safety matrix");
+    run_public_api_matrix()
+        .await
+        .expect("public task search API safety matrix");
 }

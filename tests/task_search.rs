@@ -3,7 +3,10 @@
 #[path = "task_pagination_fixture.rs"]
 mod fixture;
 
-use std::{collections::HashSet, time::{Duration, Instant}};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use ai_crew_sync::{
     auth::AuthCtx,
@@ -44,7 +47,12 @@ fn page_query(
     }
 }
 
-fn search(query: Option<&str>, mode: Option<&str>, fields: Option<&str>, language: Option<&str>) -> TaskSearchQuery {
+fn search(
+    query: Option<&str>,
+    mode: Option<&str>,
+    fields: Option<&str>,
+    language: Option<&str>,
+) -> TaskSearchQuery {
     TaskSearchQuery {
         search: query.map(str::to_owned),
         search_mode: mode.map(str::to_owned),
@@ -60,11 +68,15 @@ async fn seed_search_fixture(fixture: &Fixture) -> Result<(), sqlx::Error> {
         let (title, description) = match ordinal % 8 {
             0 => (
                 format!("Running deployment database search {ordinal:04}"),
-                Some(format!("English operator guide for the running service {ordinal:04}")),
+                Some(format!(
+                    "English operator guide for the running service {ordinal:04}"
+                )),
             ),
             1 => (
                 format!("Russian inventory task {ordinal:04}"),
-                Some(format!("Быстрые задачи проекта и поиск данных {ordinal:04}")),
+                Some(format!(
+                    "Быстрые задачи проекта и поиск данных {ordinal:04}"
+                )),
             ),
             2 => (
                 format!("Literal 100%_wildcard marker {ordinal:04}"),
@@ -116,20 +128,18 @@ async fn seed_search_fixture(fixture: &Fixture) -> Result<(), sqlx::Error> {
 
 async fn add_foreign_team_task(fixture: &Fixture) -> Result<Uuid, sqlx::Error> {
     let mut tx = fixture.pool.begin().await?;
-    let team_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO teams (slug, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("search-foreign-{}", Uuid::new_v4().simple()))
-    .bind("foreign search team")
-    .fetch_one(&mut *tx)
-    .await?;
-    let agent_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO agents (team_id, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(team_id)
-    .bind("foreign-agent")
-    .fetch_one(&mut *tx)
-    .await?;
+    let team_id: Uuid =
+        sqlx::query_scalar("INSERT INTO teams (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("search-foreign-{}", Uuid::new_v4().simple()))
+            .bind("foreign search team")
+            .fetch_one(&mut *tx)
+            .await?;
+    let agent_id: Uuid =
+        sqlx::query_scalar("INSERT INTO agents (team_id, name) VALUES ($1, $2) RETURNING id")
+            .bind(team_id)
+            .bind("foreign-agent")
+            .fetch_one(&mut *tx)
+            .await?;
     sqlx::query(
         "INSERT INTO tasks (team_id, key, title, description, created_by) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -144,7 +154,10 @@ async fn add_foreign_team_task(fixture: &Fixture) -> Result<Uuid, sqlx::Error> {
     Ok(team_id)
 }
 
-async fn claim_one(fixture: &Fixture, auth: &AuthCtx) -> Result<String, Box<dyn std::error::Error>> {
+async fn claim_one(
+    fixture: &Fixture,
+    auth: &AuthCtx,
+) -> Result<String, Box<dyn std::error::Error>> {
     let key = format!("{}:0000", fixture.task_prefix);
     tasks::claim_task(&fixture.pool, auth, &key, Some(60)).await?;
     Ok(key)
@@ -220,8 +233,18 @@ async fn run_real_client(
 
 async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = setup_fixture().await?;
-    let primary = auth(&fixture, fixture.agent_id, "fixture-primary", "search-worker");
-    let secondary = auth(&fixture, fixture.other_agent_id, "fixture-secondary", "search-secondary");
+    let primary = auth(
+        &fixture,
+        fixture.agent_id,
+        "fixture-primary",
+        "search-worker",
+    );
+    let secondary = auth(
+        &fixture,
+        fixture.other_agent_id,
+        "fixture-secondary",
+        "search-secondary",
+    );
     let result = async {
         seed_search_fixture(&fixture).await?;
         let foreign_team_id = add_foreign_team_task(&fixture).await?;
@@ -231,41 +254,76 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), None, false, 50, None),
-            search(Some("deployment"), Some("keywords"), Some("title"), Some("simple")),
+            search(
+                Some("deployment"),
+                Some("keywords"),
+                Some("title"),
+                Some("simple"),
+            ),
         )
         .await?;
-        assert!(title_only.tasks.iter().all(|task| task.title.to_ascii_lowercase().contains("deployment")));
+        assert!(
+            title_only
+                .tasks
+                .iter()
+                .all(|task| task.title.to_ascii_lowercase().contains("deployment"))
+        );
         assert!(title_only.tasks.len() >= 50);
-        assert_eq!(title_only.open + title_only.claimed, LARGE_FIXTURE_SIZE as i64);
+        assert_eq!(
+            title_only.open + title_only.claimed,
+            LARGE_FIXTURE_SIZE as i64
+        );
 
         let description_only = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &secondary,
             page_query(Some(&fixture.task_prefix), None, false, 100, None),
-            search(Some("быстрый"), Some("keywords"), Some("description"), Some("russian")),
+            search(
+                Some("быстрый"),
+                Some("keywords"),
+                Some("description"),
+                Some("russian"),
+            ),
         )
         .await?;
         assert!(!description_only.tasks.is_empty());
-        assert!(description_only.tasks.iter().all(|task| task.description.as_deref().unwrap_or_default().contains("Быстрые")));
+        assert!(description_only.tasks.iter().all(|task| {
+            task.description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Быстрые")
+        }));
 
         let english_stemming = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), None, false, 100, None),
-            search(Some("run"), Some("keywords"), Some("title"), Some("english")),
+            search(
+                Some("run"),
+                Some("keywords"),
+                Some("title"),
+                Some("english"),
+            ),
         )
         .await?;
         assert!(!english_stemming.tasks.is_empty());
-        assert!(english_stemming
-            .tasks
-            .iter()
-            .all(|task| task.title.to_ascii_lowercase().contains("running")));
+        assert!(
+            english_stemming
+                .tasks
+                .iter()
+                .all(|task| task.title.to_ascii_lowercase().contains("running"))
+        );
 
         let phrase = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), None, false, 100, None),
-            search(Some("\"database search\""), Some("keywords"), Some("both"), Some("simple")),
+            search(
+                Some("\"database search\""),
+                Some("keywords"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(!phrase.tasks.is_empty());
@@ -274,23 +332,43 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), None, false, 100, None),
-            search(Some("100%_wildcard"), Some("contains"), Some("title"), Some("simple")),
+            search(
+                Some("100%_wildcard"),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(!literal.tasks.is_empty());
-        assert!(literal.tasks.iter().all(|task| task.title.contains("100%_wildcard")));
+        assert!(
+            literal
+                .tasks
+                .iter()
+                .all(|task| task.title.contains("100%_wildcard"))
+        );
 
         let regex = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), None, false, 100, None),
-            search(Some("DEPLOYMENT"), Some("regex"), Some("both"), Some("simple")),
+            search(
+                Some("DEPLOYMENT"),
+                Some("regex"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert!(!regex.tasks.is_empty());
         assert!(regex.tasks.iter().all(|task| {
             task.title.to_ascii_lowercase().contains("deployment")
-                || task.description.as_deref().unwrap_or_default().to_ascii_lowercase().contains("deployment")
+                || task
+                    .description
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .contains("deployment")
         }));
 
         for invalid in [
@@ -298,16 +376,23 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
             search(Some("x"), Some("unknown"), Some("title"), Some("simple")),
             search(Some("x"), Some("contains"), Some("unknown"), Some("simple")),
             search(Some("x"), Some("keywords"), Some("title"), Some("unknown")),
-            search(Some(&"x".repeat(513)), Some("contains"), Some("title"), Some("simple")),
+            search(
+                Some(&"x".repeat(513)),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
         ] {
-            assert!(tasks::list_tasks_page_with_search(
-                &fixture.pool,
-                &primary,
-                page_query(Some(&fixture.task_prefix), None, false, 20, None),
-                invalid,
-            )
-            .await
-            .is_err());
+            assert!(
+                tasks::list_tasks_page_with_search(
+                    &fixture.pool,
+                    &primary,
+                    page_query(Some(&fixture.task_prefix), None, false, 20, None),
+                    invalid,
+                )
+                .await
+                .is_err()
+            );
         }
 
         let pathological_start = Instant::now();
@@ -317,7 +402,12 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
                 &fixture.pool,
                 &primary,
                 page_query(Some(&fixture.task_prefix), None, false, 10, None),
-                search(Some("^(a+)+$"), Some("regex"), Some("description"), Some("simple")),
+                search(
+                    Some("^(a+)+$"),
+                    Some("regex"),
+                    Some("description"),
+                    Some("simple"),
+                ),
             ),
         )
         .await??;
@@ -352,31 +442,69 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), None, false, 10, None),
-            search(Some("deployment"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         let token = first.next_cursor.clone().expect("search page cursor");
         for altered in [
-            search(Some("database"), Some("contains"), Some("both"), Some("simple")),
-            search(Some("deployment"), Some("regex"), Some("both"), Some("simple")),
-            search(Some("deployment"), Some("contains"), Some("title"), Some("simple")),
-            search(Some("deployment"), Some("contains"), Some("both"), Some("english")),
+            search(
+                Some("database"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
+            search(
+                Some("deployment"),
+                Some("regex"),
+                Some("both"),
+                Some("simple"),
+            ),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("title"),
+                Some("simple"),
+            ),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("both"),
+                Some("english"),
+            ),
         ] {
-            assert!(tasks::list_tasks_page_with_search(
-                &fixture.pool,
-                &primary,
-                page_query(Some(&fixture.task_prefix), None, false, 10, Some(token.clone())),
-                altered,
-            )
-            .await
-            .is_err());
+            assert!(
+                tasks::list_tasks_page_with_search(
+                    &fixture.pool,
+                    &primary,
+                    page_query(
+                        Some(&fixture.task_prefix),
+                        None,
+                        false,
+                        10,
+                        Some(token.clone())
+                    ),
+                    altered,
+                )
+                .await
+                .is_err()
+            );
         }
 
         let status_page = tasks::list_tasks_page_with_search(
             &fixture.pool,
             &primary,
             page_query(Some(&fixture.task_prefix), Some("claimed"), true, 20, None),
-            search(Some("deployment"), Some("contains"), Some("both"), Some("simple")),
+            search(
+                Some("deployment"),
+                Some("contains"),
+                Some("both"),
+                Some("simple"),
+            ),
         )
         .await?;
         assert_eq!(status_page.tasks.len(), 1);
@@ -400,7 +528,14 @@ async fn run_e2e() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(empty_search.tasks[0].key, default_page.tasks[0].key);
 
         run_real_client(&fixture, None, None, None, None).await?;
-        run_real_client(&fixture, Some("deployment"), Some("contains"), Some("both"), Some("simple")).await?;
+        run_real_client(
+            &fixture,
+            Some("deployment"),
+            Some("contains"),
+            Some("both"),
+            Some("simple"),
+        )
+        .await?;
 
         sqlx::query("DELETE FROM teams WHERE id = $1")
             .bind(foreign_team_id)
