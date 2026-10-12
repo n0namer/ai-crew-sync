@@ -888,14 +888,29 @@ pub async fn list_tasks_page_with_search(
         }
         Ok(rows) => rows,
     };
-    let (open, claimed): (i64, i64) = sqlx::query_as(AssertSqlSafe(format!(
+    let totals_result: Result<(i64, i64), sqlx::Error> = sqlx::query_as(AssertSqlSafe(format!(
         r#"SELECT count(*) FILTER (WHERE ({EFFECTIVE_STATUS}) = 'open'),
                   count(*) FILTER (WHERE ({EFFECTIVE_STATUS}) = 'claimed')
            FROM tasks t WHERE t.team_id = $1"#
     )))
     .bind(auth.team_id)
     .fetch_one(&mut *tx)
-    .await?;
+    .await;
+    let (open, claimed) = match totals_result {
+        Err(error) => {
+            let mapped = map_search_database_error(&error);
+            let fallback = if mapped.is_none() {
+                Some(error.into())
+            } else {
+                None
+            };
+            let _ = tx.rollback().await;
+            return Err(mapped
+                .or(fallback)
+                .expect("search totals error mapping produced no error"));
+        }
+        Ok(totals) => totals,
+    };
     tx.commit().await?;
 
     let has_more = rows.len() > limit as usize;

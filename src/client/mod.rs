@@ -518,8 +518,13 @@ fn add_task_pagination_metadata(value: &mut Value, incomplete: bool, exhausted: 
         object.insert("exhausted".to_owned(), json!(exhausted));
         object.insert(
             "pagination".to_owned(),
-            json!({ "incomplete": incomplete, "exhausted": exhausted }),
+            json!({
+                "incomplete": incomplete,
+                "exhausted": exhausted,
+                "consistency": "paged_best_effort"
+            }),
         );
+        object.insert("consistency".to_owned(), json!("paged_best_effort"));
     }
 }
 
@@ -530,15 +535,17 @@ async fn fetch_all_task_pages(
 ) -> anyhow::Result<Value> {
     let mut combined = Value::Null;
     let mut seen_cursors = std::collections::HashSet::new();
+    let mut seen_keys = std::collections::HashSet::new();
     if let Some(cursor) = arguments.get("cursor").and_then(Value::as_str) {
         seen_cursors.insert(cursor.to_owned());
     }
-    let mut incomplete = false;
     let mut exhausted = false;
 
     loop {
         let page = call_tool_value(client, tool, arguments.clone()).await?;
-        let (has_more, page_exhausted) = task_page_state(&page);
+        let Some(has_more) = page.get("has_more").and_then(Value::as_bool) else {
+            bail!("INCOMPLETE_INVENTORY: server did not expose cursor pagination");
+        };
         let next_cursor = page
             .get("next_cursor")
             .and_then(Value::as_str)
@@ -555,35 +562,37 @@ async fn fetch_all_task_pages(
             combined.as_object_mut(),
             page.get("tasks").and_then(Value::as_array),
         ) {
-            if let Some(existing) = target.get_mut("tasks").and_then(Value::as_array_mut) {
-                existing.extend(tasks.iter().cloned());
+            for task in tasks {
+                let Some(key) = task.get("key").and_then(Value::as_str) else {
+                    bail!("INVALID_INVENTORY_PAGE: task is missing key");
+                };
+                if !seen_keys.insert(key.to_owned()) {
+                    bail!("DUPLICATE_INVENTORY_KEY: task key repeated: {key}");
+                }
+                if let Some(existing) = target.get_mut("tasks").and_then(Value::as_array_mut) {
+                    existing.push(task.clone());
+                }
             }
         }
 
-        if page_exhausted {
-            exhausted = true;
-            break;
-        }
-        let Some(next_cursor) = next_cursor else {
-            incomplete = true;
-            break;
-        };
-        if !seen_cursors.insert(next_cursor.clone()) {
-            incomplete = true;
-            break;
-        }
-        arguments.insert("cursor".to_owned(), json!(next_cursor));
         if !has_more {
             exhausted = true;
             break;
         }
+        let Some(next_cursor) = next_cursor else {
+            bail!("INCOMPLETE_INVENTORY: server announced another page without a cursor");
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            bail!("INVALID_CURSOR: server replayed a cursor");
+        }
+        arguments.insert("cursor".to_owned(), json!(next_cursor));
     }
 
     if let Some(object) = combined.as_object_mut() {
         object.insert("next_cursor".to_owned(), Value::Null);
         object.insert("has_more".to_owned(), json!(!exhausted));
     }
-    add_task_pagination_metadata(&mut combined, incomplete, exhausted);
+    add_task_pagination_metadata(&mut combined, false, exhausted);
     Ok(combined)
 }
 
@@ -606,6 +615,8 @@ mod tests {
         assert_eq!(value["exhausted"], false);
         assert_eq!(value["pagination"]["incomplete"], true);
         assert_eq!(value["pagination"]["exhausted"], false);
+        assert_eq!(value["consistency"], "paged_best_effort");
+        assert_eq!(value["pagination"]["consistency"], "paged_best_effort");
 
         add_task_pagination_metadata(&mut value, false, true);
         assert_eq!(value["incomplete"], false);
