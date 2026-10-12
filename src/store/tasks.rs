@@ -7,6 +7,10 @@ use crate::{
     model::{ClaimResult, TaskDetail, TaskEventInfo, TaskInfo, TaskList, ts, ts_opt},
 };
 
+#[path = "task_cancel.rs"]
+mod task_cancel;
+pub use task_cancel::{cancel_task, CancelInput};
+
 #[path = "task_cursor.rs"]
 mod task_cursor;
 use task_cursor::{
@@ -286,17 +290,18 @@ pub async fn create_task(pool: &PgPool, auth: &AuthCtx, input: CreateInput) -> B
 
     // Resolved inside the same transaction, so a missing key rolls the task
     // back with it: a typo fails the whole call and leaves nothing behind.
-    let found: Vec<(String, Uuid)> =
-        sqlx::query_as("SELECT key, id FROM tasks WHERE team_id = $1 AND key = ANY($2)")
+    let found: Vec<(String, Uuid, String)> =
+        sqlx::query_as("SELECT key, id, status FROM tasks WHERE team_id = $1 AND key = ANY($2) FOR KEY SHARE")
             .bind(auth.team_id)
             .bind(&dep_keys)
             .fetch_all(&mut *tx)
             .await?;
-    let found: std::collections::HashMap<String, Uuid> = found.into_iter().collect();
+    let found: std::collections::HashMap<String, (Uuid, String)> = found.into_iter().map(|(key, id, status)| (key, (id, status))).collect();
     let mut dep_ids: Vec<Uuid> = Vec::with_capacity(dep_keys.len());
     for dep_key in &dep_keys {
         match found.get(dep_key) {
-            Some(id) => dep_ids.push(*id),
+            Some((id, status)) if status != "cancelled" => dep_ids.push(*id),
+            Some(_) => return Err(BusError::conflict(format!("dependency '{dep_key}' is cancelled; use a canonical successor"))),
             None => {
                 return Err(BusError::not_found(format!(
                     "dependency '{dep_key}' does not exist; create it first"

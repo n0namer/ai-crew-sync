@@ -159,6 +159,19 @@ pub struct CompleteTaskArgs {
     pub result: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CancelTaskArgs {
+    /// Exact original task key; history and original ID are retained.
+    pub key: String,
+    /// DUPLICATE, SUPERSEDED, OBSOLETE, or INVALID.
+    pub reason: String,
+    /// Canonical existing task, required for DUPLICATE and SUPERSEDED.
+    #[serde(default)]
+    pub successor_key: Option<String>,
+    /// Evidence links or receipt references supporting the decision.
+    pub evidence_refs: Vec<String>,
+}
+
 #[tool_router(router = tasks_router, vis = "pub")]
 impl Bus {
     #[tool(
@@ -283,6 +296,25 @@ impl Bus {
     ) -> Result<Json<TaskInfo>, ErrorData> {
         let auth = auth_of(&ctx)?;
         Ok(Json(tasks::release_task(&self.db, &auth, &args.key).await?))
+    }
+
+    #[tool(
+        description = "Safely cancel/supersede an open task without claiming success.
+                       Requires exact task key, reason and evidence; refuses live
+                       claims and unfinished downstream dependents. Preserves history."
+    )]
+    async fn cancel_task(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<CancelTaskArgs>,
+    ) -> Result<Json<TaskInfo>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        Ok(Json(tasks::cancel_task(&self.db, &auth, tasks::CancelInput {
+            key: args.key,
+            reason: args.reason,
+            successor_key: args.successor_key,
+            evidence_refs: args.evidence_refs,
+        }).await?))
     }
 
     #[tool(
