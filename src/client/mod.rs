@@ -303,6 +303,20 @@ pub enum TaskCmd {
     Release {
         key: String,
     },
+    /// Cancel an unfinished task with a durable reason; never mark it done.
+    Cancel {
+        key: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Supersede an unfinished task with an existing successor.
+    Supersede {
+        key: String,
+        #[arg(long)]
+        successor_key: String,
+        #[arg(long)]
+        reason: String,
+    },
     Done {
         key: String,
         #[arg(long)]

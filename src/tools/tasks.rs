@@ -95,7 +95,7 @@ pub struct CreateTaskArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListTasksArgs {
-    /// Filter by status: "open", "claimed", "done", "cancelled", or "any".
+    /// Filter by status: "open", "claimed", "done", "cancelled", "superseded", or "any".
     /// Defaults to all statuses. "open" includes tasks whose claim lapsed;
     /// "claimed" is live claims only.
     #[serde(default)]
@@ -157,6 +157,24 @@ pub struct CompleteTaskArgs {
     /// teammates will read instead of asking you.
     #[serde(default)]
     pub result: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CancelTaskArgs {
+    /// The task key to cancel.
+    pub key: String,
+    /// Durable, non-empty explanation for why this task is cancelled.
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupersedeTaskArgs {
+    /// The task key being replaced.
+    pub key: String,
+    /// Existing task key that becomes the stable successor.
+    pub successor_key: String,
+    /// Durable, non-empty explanation for the replacement.
+    pub reason: String,
 }
 
 #[tool_router(router = tasks_router, vis = "pub")]
@@ -297,6 +315,39 @@ impl Bus {
         let auth = auth_of(&ctx)?;
         Ok(Json(
             tasks::complete_task(&self.db, &auth, &args.key, args.result).await?,
+        ))
+    }
+
+    #[tool(
+        description = "Cancel an unfinished task with a durable reason. Refuses live claims held by another session, completed tasks, and tasks that would leave active dependents incorrectly unblocked. Repeating the exact request is idempotent."
+    )]
+    async fn cancel_task(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<CancelTaskArgs>,
+    ) -> Result<Json<TaskInfo>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        Ok(Json(tasks::cancel_task(&self.db, &auth, &args.key, &args.reason).await?))
+    }
+
+    #[tool(
+        description = "Mark an unfinished task superseded by an existing same-team successor and record a durable reason. Refuses self/cyclic successors, live foreign claims, and contradictory repeats; repeating the exact request is idempotent."
+    )]
+    async fn supersede_task(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<SupersedeTaskArgs>,
+    ) -> Result<Json<TaskInfo>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        Ok(Json(
+            tasks::supersede_task(
+                &self.db,
+                &auth,
+                &args.key,
+                &args.successor_key,
+                &args.reason,
+            )
+            .await?,
         ))
     }
 }

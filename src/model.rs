@@ -288,14 +288,21 @@ pub struct TaskInfo {
     pub key: String,
     pub title: String,
     pub description: Option<String>,
-    /// One of `open`, `claimed`, `done`, `cancelled`. A claim whose lease
-    /// lapsed reads as `open`: anyone may take it, the former holder
-    /// included (see `lapsed_holder`).
+    /// One of `open`, `claimed`, `done`, `cancelled`, `superseded`.
+    /// A claim whose lease lapsed reads as `open`: anyone may take it, the
+    /// former holder included (see `lapsed_holder`).  Only `done` resolves
+    /// a dependency; cancelled and superseded history remains blocking.
     pub status: String,
+    /// Recorded cancellation reason, when the task was cancelled.
+    pub cancellation_reason: Option<String>,
+    /// Stable key of the task selected as this task's successor.
+    pub superseded_by: Option<String>,
+    /// Recorded reason for selecting `superseded_by`.
+    pub supersede_reason: Option<String>,
     /// Keys of tasks this one depends on.
     pub depends_on: Vec<String>,
-    /// True while any dependency is not yet done/cancelled. Blocked tasks
-    /// cannot be claimed.
+    /// True while any dependency is not yet accepted as done. Cancelled and
+    /// superseded dependencies remain blocking; blocked tasks cannot be claimed.
     pub blocked: bool,
     pub claimed_by: Option<String>,
     /// Which of `claimed_by`'s working contexts holds the claim; `null` is

@@ -29,6 +29,8 @@ const MAX_TITLE_BYTES: usize = 512;
 /// attachment on the task.
 const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
+/// A transition reason is durable audit context, not an unbounded transcript.
+const MAX_TRANSITION_REASON_BYTES: usize = 4 * 1024;
 /// A pipeline with more upstream tasks than this wants restructuring, and an
 /// unbounded list is one INSERT per entry.
 const MAX_DEPENDENCIES: usize = 32;
@@ -40,6 +42,9 @@ struct TaskRow {
     description: Option<String>,
     status: String,
     status_rank: i32,
+    cancellation_reason: Option<String>,
+    superseded_by: Option<String>,
+    supersede_reason: Option<String>,
     depends_on: Vec<String>,
     blocked: bool,
     claimed_by: Option<String>,
@@ -70,6 +75,9 @@ impl From<TaskRow> for TaskInfo {
                 title: r.title,
                 description: r.description,
                 status: "open".to_owned(),
+                cancellation_reason: r.cancellation_reason,
+                superseded_by: r.superseded_by,
+                supersede_reason: r.supersede_reason,
                 depends_on: r.depends_on,
                 blocked: r.blocked,
                 claimed_by: None,
@@ -100,6 +108,9 @@ impl From<TaskRow> for TaskInfo {
             title: r.title,
             description: r.description,
             status: r.status,
+            cancellation_reason: r.cancellation_reason,
+            superseded_by: r.superseded_by,
+            supersede_reason: r.supersede_reason,
             depends_on: r.depends_on,
             blocked: r.blocked,
             claimed_by: r.claimed_by,
@@ -127,6 +138,9 @@ const TASK_SELECT: &str = r#"
            t.title,
            t.description,
            t.status,
+           t.cancellation_reason,
+           successor.key AS superseded_by,
+           t.supersede_reason,
            CASE
                WHEN t.status = 'claimed' AND t.lease_expires_at <= now() THEN 1
                WHEN t.status = 'claimed' THEN 0
@@ -142,7 +156,7 @@ const TASK_SELECT: &str = r#"
            EXISTS (
                SELECT 1
                FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
-               WHERE td.task_id = t.id AND d.status NOT IN ('done', 'cancelled')
+               WHERE td.task_id = t.id AND d.status <> 'done'
            ) AS blocked,
            cb.name AS claimed_by,
            t.claimed_session,
@@ -165,6 +179,7 @@ const TASK_SELECT: &str = r#"
            t.created_at,
            t.updated_at
     FROM tasks t
+    LEFT JOIN tasks successor ON successor.id = t.superseded_by_task_id
     LEFT JOIN agents cb  ON cb.id = t.claimed_by
     LEFT JOIN agents crb ON crb.id = t.created_by
 "#;
@@ -203,6 +218,14 @@ fn normalize_key(key: &str) -> BusResult<String> {
         return Err(BusError::invalid("task key is limited to 128 characters"));
     }
     Ok(key.to_owned())
+}
+
+fn normalize_transition_reason(reason: &str) -> BusResult<String> {
+    let reason = super::check_text("transition reason", reason, MAX_TRANSITION_REASON_BYTES)?;
+    if reason.is_empty() {
+        return Err(BusError::invalid("transition reason cannot be empty"));
+    }
+    Ok(reason)
 }
 
 // ------------------------------------------------------------------ create --
@@ -286,17 +309,34 @@ pub async fn create_task(pool: &PgPool, auth: &AuthCtx, input: CreateInput) -> B
 
     // Resolved inside the same transaction, so a missing key rolls the task
     // back with it: a typo fails the whole call and leaves nothing behind.
-    let found: Vec<(String, Uuid)> =
-        sqlx::query_as("SELECT key, id FROM tasks WHERE team_id = $1 AND key = ANY($2)")
-            .bind(auth.team_id)
-            .bind(&dep_keys)
-            .fetch_all(&mut *tx)
-            .await?;
-    let found: std::collections::HashMap<String, Uuid> = found.into_iter().collect();
+    // Hold each prerequisite row until the dependent edge commits. A concurrent
+    // cancellation also takes FOR UPDATE on that row: either this creation
+    // commits first and cancellation sees an active dependent, or cancellation
+    // commits first and this creation rejects the terminal prerequisite.
+    let found: Vec<(String, Uuid, String)> = sqlx::query_as(
+        "SELECT key, id, status FROM tasks
+         WHERE team_id = $1 AND key = ANY($2)
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(auth.team_id)
+    .bind(&dep_keys)
+    .fetch_all(&mut *tx)
+    .await?;
+    let found: std::collections::HashMap<String, (Uuid, String)> = found
+        .into_iter()
+        .map(|(key, id, status)| (key, (id, status)))
+        .collect();
     let mut dep_ids: Vec<Uuid> = Vec::with_capacity(dep_keys.len());
     for dep_key in &dep_keys {
         match found.get(dep_key) {
-            Some(id) => dep_ids.push(*id),
+            Some((id, status)) if matches!(status.as_str(), "open" | "claimed" | "done") => {
+                dep_ids.push(*id);
+            }
+            Some((_, status)) => {
+                return Err(BusError::conflict(format!(
+                    "dependency '{dep_key}' is {status}; a terminal task cannot be a new prerequisite"
+                )));
+            }
             None => {
                 return Err(BusError::not_found(format!(
                     "dependency '{dep_key}' does not exist; create it first"
@@ -644,10 +684,10 @@ pub async fn list_tasks_page(
         .map(|value| value.trim().to_lowercase())
         .filter(|value| value != "any");
     if let Some(value) = &status
-        && !["open", "claimed", "done", "cancelled"].contains(&value.as_str())
+        && !["open", "claimed", "done", "cancelled", "superseded"].contains(&value.as_str())
     {
         return Err(BusError::invalid(
-            "status must be one of: open, claimed, done, cancelled, any",
+            "status must be one of: open, claimed, done, cancelled, superseded, any",
         ));
     }
     let project_prefix = normalize_project_prefix(query.project_prefix);
@@ -759,10 +799,10 @@ pub async fn list_tasks_page_with_search(
         .map(|value| value.trim().to_lowercase())
         .filter(|value| value != "any");
     if let Some(value) = &status
-        && !["open", "claimed", "done", "cancelled"].contains(&value.as_str())
+        && !["open", "claimed", "done", "cancelled", "superseded"].contains(&value.as_str())
     {
         return Err(BusError::invalid(
-            "status must be one of: open, claimed, done, cancelled, any",
+            "status must be one of: open, claimed, done, cancelled, superseded, any",
         ));
     }
     let project_prefix = normalize_project_prefix(query.project_prefix);
@@ -994,12 +1034,11 @@ pub async fn claim_task(
           -- existed counts as the shared session, which is what it was.
           AND (status = 'open'
                OR (claimed_by = $1 AND COALESCE(claimed_session, '') = $5)
-               OR lease_expires_at IS NULL
-               OR lease_expires_at < now())
+               OR (lease_expires_at IS NOT NULL AND lease_expires_at < now()))
           AND NOT EXISTS (
               SELECT 1
               FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
-              WHERE td.task_id = tasks.id AND d.status NOT IN ('done', 'cancelled')
+              WHERE td.task_id = tasks.id AND d.status <> 'done'
           )
         RETURNING id
         "#,
@@ -1139,7 +1178,7 @@ pub async fn claim_next_task(
               AND NOT EXISTS (
                   SELECT 1
                   FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
-                  WHERE td.task_id = tasks.id AND d.status NOT IN ('done', 'cancelled')
+                  WHERE td.task_id = tasks.id AND d.status <> 'done'
               )
             ORDER BY created_at
             LIMIT 1
@@ -1217,7 +1256,7 @@ pub async fn renew_lease(
           -- A lease that lapsed is not renewed, it is claimed again: the task
           -- has been open to everyone since, and ownership is re-established
           -- through the same door as everyone else's.
-          AND lease_expires_at > now()
+          AND (lease_expires_at IS NULL OR lease_expires_at > now())
         RETURNING id
         "#,
     )
@@ -1312,14 +1351,21 @@ pub async fn complete_task(
         UPDATE tasks
         SET status = 'done',
             result = $1,
+            claimed_by = NULL,
+            claimed_session = NULL,
+            claimed_at = NULL,
             lease_expires_at = NULL,
             updated_at = now()
         WHERE team_id = $2 AND key = $3 AND status IN ('open', 'claimed')
           AND (
-              claimed_by IS NULL
-              OR lease_expires_at IS NULL
-              OR lease_expires_at <= now()
+              status = 'open'
               OR (claimed_by = $4 AND COALESCE(claimed_session, '') = $5)
+              OR (lease_expires_at IS NOT NULL AND lease_expires_at <= now())
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM task_deps td
+              JOIN tasks prerequisite ON prerequisite.id = td.blocked_by_task_id
+              WHERE td.task_id = tasks.id AND prerequisite.status <> 'done'
           )
         RETURNING id
         "#,
@@ -1356,6 +1402,298 @@ pub async fn complete_task(
             )))
         }
     }
+}
+
+/// A session may change an unfinished task only when it owns its live claim.
+fn claimed_by_another_session(
+    auth: &AuthCtx,
+    status: &str,
+    claimed_by: Option<Uuid>,
+    claimed_session: Option<&str>,
+    lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    status == "claimed"
+        && lease_expires_at.is_none_or(|expiry| expiry > chrono::Utc::now())
+        && (claimed_by != Some(auth.agent_id)
+            || claimed_session.unwrap_or("") != auth.session)
+}
+
+/// Cancel an unfinished, safely isolated task.  A cancellation never resolves a
+/// dependency: callers must re-plan active dependents instead of silently
+/// making them claimable.
+pub async fn cancel_task(
+    pool: &PgPool,
+    auth: &AuthCtx,
+    key: &str,
+    reason: &str,
+) -> BusResult<TaskInfo> {
+    let key = normalize_key(key)?;
+    let reason = normalize_transition_reason(reason)?;
+    let mut tx = pool.begin().await?;
+    super::sessions::guard(&mut tx, auth).await?;
+
+    let task: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, status, claimed_by, claimed_session, lease_expires_at, cancellation_reason
+             FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
+        )
+        .bind(auth.team_id)
+        .bind(&key)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((id, status, claimed_by, claimed_session, lease_expires_at, old_reason)) = task else {
+        return Err(BusError::not_found(format!("task '{key}'")));
+    };
+
+    if status == "cancelled" {
+        if old_reason.as_deref() == Some(reason.as_str()) {
+            tx.commit().await?;
+            return fetch_task(pool, auth, &key).await;
+        }
+        return Err(BusError::conflict(format!(
+            "task '{key}' is already cancelled with a different reason"
+        )));
+    }
+    if status == "done" {
+        return Err(BusError::conflict(format!(
+            "task '{key}' is already done and its accepted result is immutable"
+        )));
+    }
+    if status == "superseded" {
+        return Err(BusError::conflict(format!("task '{key}' is already superseded")));
+    }
+    if claimed_by_another_session(
+        auth,
+        &status,
+        claimed_by,
+        claimed_session.as_deref(),
+        lease_expires_at,
+    ) {
+        return Err(BusError::conflict(format!(
+            "task '{key}' has a live claim held by another session"
+        )));
+    }
+
+    let active_dependents: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM task_deps td
+            JOIN tasks dependent ON dependent.id = td.task_id
+            WHERE td.blocked_by_task_id = $1
+              AND dependent.status IN ('open', 'claimed')
+        )",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_dependents {
+        return Err(BusError::conflict(format!(
+            "task '{key}' has active dependents; cancellation would require an explicit safe rewire"
+        )));
+    }
+
+    sqlx::query(
+        "UPDATE tasks
+         SET status = 'cancelled', cancellation_reason = $1,
+             claimed_by = NULL, claimed_session = NULL, claimed_at = NULL,
+             lease_expires_at = NULL, updated_at = now()
+         WHERE id = $2",
+    )
+    .bind(&reason)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    log_event_tx(&mut tx, id, auth.agent_id, "cancelled", Some(&reason)).await?;
+    sqlx::query(
+        "INSERT INTO task_transition_audit
+         (task_id, team_id, actor_agent_id, actor_session, transition, reason)
+         VALUES ($1, $2, $3, $4, 'cancelled', $5)",
+    )
+    .bind(id)
+    .bind(auth.team_id)
+    .bind(auth.agent_id)
+    .bind(&auth.session)
+    .bind(&reason)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    fetch_task(pool, auth, &key).await
+}
+
+/// Mark a task as superseded without rewriting historical dependency edges.
+/// Serial advisory locks make a pair of opposing requests observe each other,
+/// so they cannot form a successor cycle.
+pub async fn supersede_task(
+    pool: &PgPool,
+    auth: &AuthCtx,
+    key: &str,
+    successor_key: &str,
+    reason: &str,
+) -> BusResult<TaskInfo> {
+    let key = normalize_key(key)?;
+    let successor_key = normalize_key(successor_key)?;
+    let reason = normalize_transition_reason(reason)?;
+    if key == successor_key {
+        return Err(BusError::invalid("a task cannot supersede itself"));
+    }
+
+    let mut tx = pool.begin().await?;
+    super::sessions::guard(&mut tx, auth).await?;
+    let mut lock_names = [
+        format!("task-transition:{}:{key}", auth.team_id),
+        format!("task-transition:{}:{successor_key}", auth.team_id),
+    ];
+    lock_names.sort();
+    for lock_name in lock_names {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_name)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let source: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, status, claimed_by, claimed_session, lease_expires_at,
+                    superseded_by_task_id, supersede_reason
+             FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
+        )
+        .bind(auth.team_id)
+        .bind(&key)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((source_id, source_status, source_claimed_by, source_session, source_lease, old_successor, old_reason)) = source else {
+        return Err(BusError::not_found(format!("task '{key}'")));
+    };
+
+    let successor: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as(
+            "SELECT id, status, claimed_by, claimed_session, lease_expires_at
+             FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
+        )
+        .bind(auth.team_id)
+        .bind(&successor_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((successor_id, successor_status, successor_claimed_by, successor_session, successor_lease)) = successor else {
+        return Err(BusError::not_found(format!(
+            "successor task '{successor_key}' does not exist in this team"
+        )));
+    };
+
+    if source_status == "superseded" {
+        if old_successor == Some(successor_id) && old_reason.as_deref() == Some(reason.as_str()) {
+            tx.commit().await?;
+            return fetch_task(pool, auth, &key).await;
+        }
+        return Err(BusError::conflict(format!(
+            "task '{key}' is already superseded by a different request"
+        )));
+    }
+    if source_status == "done" {
+        return Err(BusError::conflict(format!(
+            "task '{key}' is already done and its accepted result is immutable"
+        )));
+    }
+    if source_status == "cancelled" {
+        return Err(BusError::conflict(format!("task '{key}' is already cancelled")));
+    }
+    if !matches!(successor_status.as_str(), "open" | "claimed") {
+        return Err(BusError::conflict(format!(
+            "successor task '{successor_key}' is {successor_status}, not active"
+        )));
+    }
+    if claimed_by_another_session(
+        auth,
+        &source_status,
+        source_claimed_by,
+        source_session.as_deref(),
+        source_lease,
+    ) || claimed_by_another_session(
+        auth,
+        &successor_status,
+        successor_claimed_by,
+        successor_session.as_deref(),
+        successor_lease,
+    ) {
+        return Err(BusError::conflict(
+            "supersession requires both tasks to be unclaimed or claimed by this session",
+        ));
+    }
+
+    // Prevent a permanently blocked successor or downstream DAG. Creation
+    // locks prerequisite rows, so a concurrent new dependent cannot escape
+    // this check while the source row is FOR UPDATE locked.
+    let active_dependents: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM task_deps td
+            JOIN tasks dependent ON dependent.id = td.task_id
+            WHERE td.blocked_by_task_id = $1
+              AND dependent.status IN ('open', 'claimed')
+        )",
+    )
+    .bind(source_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_dependents {
+        return Err(BusError::conflict(format!(
+            "task '{key}' has active dependents; supersession needs an explicit safe rewire"
+        )));
+    }
+
+    let cycle: bool = sqlx::query_scalar(
+        "WITH RECURSIVE successors(id) AS (
+             SELECT $1::uuid
+             UNION
+             SELECT t.superseded_by_task_id
+             FROM tasks t JOIN successors s ON t.id = s.id
+             WHERE t.superseded_by_task_id IS NOT NULL
+         )
+         SELECT EXISTS (SELECT 1 FROM successors WHERE id = $2)",
+    )
+    .bind(successor_id)
+    .bind(source_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if cycle {
+        return Err(BusError::conflict(
+            "supersession would create a successor cycle",
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE tasks
+         SET status = 'superseded', superseded_by_task_id = $1,
+             supersede_reason = $2, claimed_by = NULL, claimed_session = NULL,
+             claimed_at = NULL, lease_expires_at = NULL, updated_at = now()
+         WHERE id = $3",
+    )
+    .bind(successor_id)
+    .bind(&reason)
+    .bind(source_id)
+    .execute(&mut *tx)
+    .await?;
+    log_event_tx(
+        &mut tx,
+        source_id,
+        auth.agent_id,
+        "superseded",
+        Some(&format!("{successor_key}: {reason}")),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO task_transition_audit
+         (task_id, team_id, actor_agent_id, actor_session, transition, reason, successor_task_id)
+         VALUES ($1, $2, $3, $4, 'superseded', $5, $6)",
+    )
+    .bind(source_id)
+    .bind(auth.team_id)
+    .bind(auth.agent_id)
+    .bind(&auth.session)
+    .bind(&reason)
+    .bind(successor_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    fetch_task(pool, auth, &key).await
 }
 
 #[cfg(test)]

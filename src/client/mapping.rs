@@ -246,6 +246,14 @@ pub fn to_call_with(
                 json!({"key": key, "lease_seconds": lease_seconds}),
             ),
             TaskCmd::Release { key } => ("release_task", json!({"key": key})),
+            TaskCmd::Cancel { key, reason } => (
+                "cancel_task",
+                json!({"key": key, "reason": reason}),
+            ),
+            TaskCmd::Supersede { key, successor_key, reason } => (
+                "supersede_task",
+                json!({"key": key, "successor_key": successor_key, "reason": reason}),
+            ),
             TaskCmd::Done { key, result } => {
                 ("complete_task", json!({"key": key, "result": result}))
             }
@@ -285,6 +293,24 @@ mod tests {
             .expect("mapping succeeds")
             .expect("this command is a tool call");
         (tool.to_string(), args)
+    }
+
+    #[test]
+    fn lifecycle_cli_commands_map_to_typed_mcp_tools() {
+        let (tool, args) = mapped(ClientCmd::Task(TaskCmd::Cancel {
+            key: "obsolete".into(),
+            reason: "DUPLICATE".into(),
+        }));
+        assert_eq!(tool, "cancel_task");
+        assert_eq!(args, serde_json::json!({"key":"obsolete", "reason":"DUPLICATE"}));
+
+        let (tool, args) = mapped(ClientCmd::Task(TaskCmd::Supersede {
+            key: "obsolete".into(),
+            successor_key: "canonical".into(),
+            reason: "SUPERSEDED".into(),
+        }));
+        assert_eq!(tool, "supersede_task");
+        assert_eq!(args, serde_json::json!({"key":"obsolete", "successor_key":"canonical", "reason":"SUPERSEDED"}));
     }
 
     #[test]
