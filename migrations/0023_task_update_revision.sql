@@ -15,6 +15,6 @@ CREATE TABLE task_update_audit (
         previous_revision > 0 AND new_revision = previous_revision + 1
     ),
     CONSTRAINT task_update_audit_same_team_task_fk
-        FOREIGN KEY (team_id, task_id) REFERENCES tasks(team_id, id) ON DELETE RESTRICT
+        FOREIGN KEY (team_id, task_id) REFERENCES tasks(team_id, id) ON DELETE CASCADE
 );
 CREATE INDEX task_update_audit_task_idx ON task_update_audit (task_id, id DESC);
