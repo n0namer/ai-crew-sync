@@ -1,0 +1,20 @@
+{
+  "schema": "crewsync.git-docker-release-lock.v1",
+  "source_commit": "07b0aa4",
+  "source_branch": "integration/lifecycle-hotrow-20261012",
+  "image": "local/ai-crew-sync:git-docker-parity-07b0aa4",
+  "image_id": "sha256:c6ebfef6005b48ca6bd77177981fecbab383d2a847911073b5ccabda9882d3d8",
+  "compose_project": "docker",
+  "compose_service": "bus",
+  "service_container": "docker-bus-1",
+  "host_port": "127.0.0.1:18787",
+  "database_container": "docker-db-1",
+  "database_name": "bus",
+  "schema_version": 22,
+  "backup_path": "D:/Archives/CrewSyncBackup/crewsync-pre-cutover-20261013.dump",
+  "backup_sha256": "a119d2d4ee062c88d6b48e4d7266a96a4d1556674daaa9fabfacc29fdcc8462d",
+  "rollback_image": "local/ai-crew-sync:auth-hotrow-candidate-20261012",
+  "rollback_image_id": "sha256:318c83983e71ff5439d70027e8592972432997dbce41733ad97a5100ea53aa73",
+  "deployed_at": "2026-10-13",
+  "notes": "Production cutover after green 4251-task private clone migration v21->v22, MCP lifecycle canary, 10/10 pagination/search/lifecycle tests, 105 affected library tests. Rollback image schema compatibility after v22 must be validated before using old binary."
+}
