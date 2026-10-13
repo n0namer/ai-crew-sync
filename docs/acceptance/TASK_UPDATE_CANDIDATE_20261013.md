@@ -29,3 +29,13 @@ CLI: `ai-crew-sync client task update KEY --expected-revision N --title "..." --
 5. Check live MCP task update / history, schema v23, preserved task count and health; only then mark task DONE.
 
 Do not deploy current candidate as if it were an accepted release.
+
+## Follow-up verification (2026-10-13)
+
+- Production candidate branch HEAD after audit cascade fix: `94dc78a`.
+- Disposable PostgreSQL 18.4 `crewsync_fixture_v23`: schema version **23** applied; `tests/task_update.rs` **2 PASS / 0 FAIL**, including optimistic concurrency, foreign claims, tenant, terminal and audit assertions.
+- `tests/task_cancel_supersede.rs`: **2 PASS / 0 FAIL** on disposable database.
+- `tests/task_pagination.rs` and `tests/task_search.rs`: **2 PASS / 0 FAIL each** after setting test-only `TASK_CURSOR_SECRET`. An initial pagination failure with missing test secret was a fixture-configuration error, resolved without product changes.
+- Docker production-mode image built successfully from clean commit `94dc78a`, tag `local/ai-crew-sync:update-candidate-94dc78a`, image ID `sha256:51ace27c2704997b5d2787cd5157d33609f3dfbbcd7839d3afcaaabc9c569db5`.
+- Candidate CLI runs. Real authenticated MCP round-trip **NOT PROVEN**: remote test-token provisioning call was blocked by security controls. Independent reviewer/reducer and clone-production cutover test **NOT PROVEN**. No production deployment or schema migration has been performed.
+- Production remains on existing `local/ai-crew-sync:git-docker-parity-07b0aa4` and PostgreSQL v22 as last verified.
