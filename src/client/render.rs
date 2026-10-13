@@ -246,6 +246,13 @@ pub(super) fn render(cmd: &ClientCmd, value: &Value) -> anyhow::Result<()> {
                 );
             }
         }
+        ClientCmd::Task(TaskCmd::Update { .. }) => {
+            render_task_line(&value["task"]);
+            println!(
+                "  revision: {} applied: {} changed_fields: {}",
+                value["revision"], value["applied"], value["changed_fields"]
+            );
+        }
         ClientCmd::Task(TaskCmd::Claim { .. } | TaskCmd::Next { .. }) => {
             if value["claimed"].as_bool() == Some(true) {
                 print!("claimed: ");

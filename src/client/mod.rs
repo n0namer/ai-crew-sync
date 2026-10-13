@@ -285,6 +285,22 @@ pub enum TaskCmd {
     Show {
         key: String,
     },
+    /// Change editable content with optimistic concurrency control.
+    Update {
+        key: String,
+        #[arg(long)]
+        expected_revision: i64,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, conflicts_with = "clear_description")]
+        description: Option<String>,
+        #[arg(long, conflicts_with = "description")]
+        clear_description: bool,
+        #[arg(long, conflicts_with = "clear_metadata")]
+        metadata_json: Option<String>,
+        #[arg(long, conflicts_with = "metadata_json")]
+        clear_metadata: bool,
+    },
     Claim {
         key: String,
         #[arg(long)]

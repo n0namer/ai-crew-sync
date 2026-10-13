@@ -285,6 +285,8 @@ pub struct MessageList {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TaskInfo {
+    /// Monotonic editable-content revision.
+    pub revision: i64,
     pub key: String,
     pub title: String,
     pub description: Option<String>,
@@ -373,6 +375,15 @@ pub struct TaskEventInfo {
 pub struct TaskDetail {
     pub task: TaskInfo,
     pub history: Vec<TaskEventInfo>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UpdateTaskResult {
+    pub task: TaskInfo,
+    pub applied: bool,
+    pub previous_revision: i64,
+    pub revision: i64,
+    pub changed_fields: Vec<String>,
 }
 
 // ------------------------------------------------------------------ notes --

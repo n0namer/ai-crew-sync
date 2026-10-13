@@ -4,7 +4,9 @@ use uuid::Uuid;
 use crate::{
     auth::AuthCtx,
     error::{BusError, BusResult},
-    model::{ClaimResult, TaskDetail, TaskEventInfo, TaskInfo, TaskList, ts, ts_opt},
+    model::{
+        ClaimResult, TaskDetail, TaskEventInfo, TaskInfo, TaskList, UpdateTaskResult, ts, ts_opt,
+    },
 };
 
 #[path = "task_cursor.rs"]
@@ -37,6 +39,7 @@ const MAX_DEPENDENCIES: usize = 32;
 
 #[derive(sqlx::FromRow)]
 struct TaskRow {
+    revision: i64,
     key: String,
     title: String,
     description: Option<String>,
@@ -71,6 +74,7 @@ impl From<TaskRow> for TaskInfo {
         // stays visible, in its own field.
         if r.lease_expired {
             return TaskInfo {
+                revision: r.revision,
                 key: r.key,
                 title: r.title,
                 description: r.description,
@@ -104,6 +108,7 @@ impl From<TaskRow> for TaskInfo {
             .filter(|_| r.status == "claimed")
             .map(|e| (e - now).num_seconds().max(0));
         TaskInfo {
+            revision: r.revision,
             key: r.key,
             title: r.title,
             description: r.description,
@@ -134,6 +139,7 @@ impl From<TaskRow> for TaskInfo {
 
 const TASK_SELECT: &str = r#"
     SELECT t.id,
+           t.revision,
            t.key,
            t.title,
            t.description,
@@ -226,6 +232,217 @@ fn normalize_transition_reason(reason: &str) -> BusResult<String> {
         return Err(BusError::invalid("transition reason cannot be empty"));
     }
     Ok(reason)
+}
+
+// Read the post-CAS task while its row is still locked, so a later
+// concurrent PATCH cannot cause a mismatched revision in this response.
+async fn fetch_task_locked(
+    conn: &mut sqlx::PgConnection,
+    auth: &AuthCtx,
+    key: &str,
+) -> BusResult<TaskInfo> {
+    let row: TaskRow = sqlx::query_as(AssertSqlSafe(format!(
+        "{TASK_SELECT} WHERE t.team_id = $1 AND t.key = $2"
+    )))
+    .bind(auth.team_id)
+    .bind(key)
+    .fetch_one(conn)
+    .await?;
+    Ok(row.into())
+}
+
+// ---------------------------------------------------------- edit content --
+/// None means absent; Some(None) is an explicit JSON null.
+pub struct UpdateInput {
+    pub expected_revision: i64,
+    pub title: Option<Option<String>>,
+    pub description: Option<Option<String>>,
+    pub metadata: Option<Option<serde_json::Value>>,
+}
+
+pub async fn update_task(
+    pool: &PgPool,
+    auth: &AuthCtx,
+    key: &str,
+    input: UpdateInput,
+) -> BusResult<UpdateTaskResult> {
+    let key = normalize_key(key)?;
+    if input.expected_revision < 1 {
+        return Err(BusError::invalid("expected_revision must be positive"));
+    }
+    if input.title.is_none() && input.description.is_none() && input.metadata.is_none() {
+        return Err(BusError::invalid(
+            "update_task needs at least one editable field",
+        ));
+    }
+
+    let validated_title = match input.title {
+        Some(Some(t)) => {
+            let t = super::check_text("task title", &t, MAX_TITLE_BYTES)?;
+            if t.is_empty() {
+                return Err(BusError::invalid("task title cannot be empty"));
+            }
+            Some(t)
+        }
+        Some(None) => return Err(BusError::invalid("task title cannot be null")),
+        None => None,
+    };
+    let validated_description = match input.description {
+        Some(Some(d)) => Some(Some(super::check_text(
+            "task description",
+            &d,
+            MAX_DESCRIPTION_BYTES,
+        )?)),
+        Some(None) => Some(None),
+        None => None,
+    };
+    let validated_metadata = match input.metadata {
+        Some(optional) => {
+            let value = optional.unwrap_or_else(|| serde_json::json!({}));
+            if !value.is_object() {
+                return Err(BusError::invalid("metadata must be a JSON object or null"));
+            }
+            super::check_metadata("task", Some(&value))?;
+            Some(value)
+        }
+        None => None,
+    };
+
+    let mut tx = pool.begin().await?;
+    super::sessions::guard(&mut tx, auth).await?;
+    let row: Option<(
+        Uuid,
+        String,
+        Option<String>,
+        serde_json::Value,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT id, title, description, metadata, status, claimed_by,
+                claimed_session, lease_expires_at, revision
+         FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
+    )
+    .bind(auth.team_id)
+    .bind(&key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((
+        task_id,
+        old_title,
+        old_description,
+        old_metadata,
+        status,
+        claimed_by,
+        claimed_session,
+        lease_expiry,
+        current_revision,
+    )) = row
+    else {
+        return Err(BusError::not_found(format!("task '{key}'")));
+    };
+
+    if !matches!(status.as_str(), "open" | "claimed") {
+        return Err(BusError::conflict(format!(
+            "task '{key}' is terminal ({status}); edit refused"
+        )));
+    }
+    if claimed_by_another_session(
+        auth,
+        &status,
+        claimed_by,
+        claimed_session.as_deref(),
+        lease_expiry,
+    ) {
+        return Err(BusError::conflict(format!(
+            "task '{key}' has a live claim held by another session"
+        )));
+    }
+    // Strict expected revision even for a no-op to reject stale writers.
+    if input.expected_revision != current_revision {
+        return Err(BusError::conflict(format!(
+            "task '{key}' revision mismatch: expected {}, current {}",
+            input.expected_revision, current_revision
+        )));
+    }
+
+    let new_title = validated_title.unwrap_or_else(|| old_title.clone());
+    let new_description = validated_description.unwrap_or_else(|| old_description.clone());
+    let new_metadata = validated_metadata.unwrap_or_else(|| old_metadata.clone());
+    let mut changed_fields = Vec::new();
+    if new_title != old_title {
+        changed_fields.push("title".to_owned());
+    }
+    if new_description != old_description {
+        changed_fields.push("description".to_owned());
+    }
+    if new_metadata != old_metadata {
+        changed_fields.push("metadata".to_owned());
+    }
+
+    if changed_fields.is_empty() {
+        let task = fetch_task_locked(&mut tx, auth, &key).await?;
+        tx.commit().await?;
+        return Ok(UpdateTaskResult {
+            task,
+            applied: false,
+            previous_revision: current_revision,
+            revision: current_revision,
+            changed_fields,
+        });
+    }
+
+    let new_revision: Option<i64> = sqlx::query_scalar(
+        "UPDATE tasks SET title=$1, description=$2, metadata=$3,
+                revision=revision+1, updated_at=now()
+         WHERE id=$4 AND team_id=$5 AND revision=$6
+         RETURNING revision",
+    )
+    .bind(&new_title)
+    .bind(&new_description)
+    .bind(&new_metadata)
+    .bind(task_id)
+    .bind(auth.team_id)
+    .bind(current_revision)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(new_revision) = new_revision else {
+        return Err(BusError::conflict("concurrent task revision changed"));
+    };
+
+    // History stores revisions and FIELD NAMES ONLY, never values or secrets.
+    let detail = serde_json::json!({
+        "previous_revision": current_revision, "revision": new_revision,
+        "changed_fields": changed_fields, "actor_session": auth.session,
+    })
+    .to_string();
+    log_event_tx(&mut tx, task_id, auth.agent_id, "updated", Some(&detail)).await?;
+    sqlx::query(
+        "INSERT INTO task_update_audit
+         (task_id, team_id, actor_agent_id, actor_session,
+          previous_revision, new_revision, changed_fields)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(task_id)
+    .bind(auth.team_id)
+    .bind(auth.agent_id)
+    .bind(&auth.session)
+    .bind(current_revision)
+    .bind(new_revision)
+    .bind(&changed_fields)
+    .execute(&mut *tx)
+    .await?;
+    let task = fetch_task_locked(&mut tx, auth, &key).await?;
+    tx.commit().await?;
+    Ok(UpdateTaskResult {
+        task,
+        applied: true,
+        previous_revision: current_revision,
+        revision: new_revision,
+        changed_fields,
+    })
 }
 
 // ------------------------------------------------------------------ create --
@@ -1429,8 +1646,7 @@ fn claimed_by_another_session(
 ) -> bool {
     status == "claimed"
         && lease_expires_at.is_none_or(|expiry| expiry > chrono::Utc::now())
-        && (claimed_by != Some(auth.agent_id)
-            || claimed_session.unwrap_or("") != auth.session)
+        && (claimed_by != Some(auth.agent_id) || claimed_session.unwrap_or("") != auth.session)
 }
 
 /// Cancel an unfinished, safely isolated task.  A cancellation never resolves a
@@ -1447,15 +1663,21 @@ pub async fn cancel_task(
     let mut tx = pool.begin().await?;
     super::sessions::guard(&mut tx, auth).await?;
 
-    let task: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT id, status, claimed_by, claimed_session, lease_expires_at, cancellation_reason
+    let task: Option<(
+        Uuid,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id, status, claimed_by, claimed_session, lease_expires_at, cancellation_reason
              FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
-        )
-        .bind(auth.team_id)
-        .bind(&key)
-        .fetch_optional(&mut *tx)
-        .await?;
+    )
+    .bind(auth.team_id)
+    .bind(&key)
+    .fetch_optional(&mut *tx)
+    .await?;
     let Some((id, status, claimed_by, claimed_session, lease_expires_at, old_reason)) = task else {
         return Err(BusError::not_found(format!("task '{key}'")));
     };
@@ -1475,7 +1697,9 @@ pub async fn cancel_task(
         )));
     }
     if status == "superseded" {
-        return Err(BusError::conflict(format!("task '{key}' is already superseded")));
+        return Err(BusError::conflict(format!(
+            "task '{key}' is already superseded"
+        )));
     }
     if claimed_by_another_session(
         auth,
@@ -1565,30 +1789,58 @@ pub async fn supersede_task(
             .await?;
     }
 
-    let source: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT id, status, claimed_by, claimed_session, lease_expires_at,
+    let source: Option<(
+        Uuid,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<Uuid>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id, status, claimed_by, claimed_session, lease_expires_at,
                     superseded_by_task_id, supersede_reason
              FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
-        )
-        .bind(auth.team_id)
-        .bind(&key)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((source_id, source_status, source_claimed_by, source_session, source_lease, old_successor, old_reason)) = source else {
+    )
+    .bind(auth.team_id)
+    .bind(&key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((
+        source_id,
+        source_status,
+        source_claimed_by,
+        source_session,
+        source_lease,
+        old_successor,
+        old_reason,
+    )) = source
+    else {
         return Err(BusError::not_found(format!("task '{key}'")));
     };
 
-    let successor: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            "SELECT id, status, claimed_by, claimed_session, lease_expires_at
+    let successor: Option<(
+        Uuid,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        "SELECT id, status, claimed_by, claimed_session, lease_expires_at
              FROM tasks WHERE team_id = $1 AND key = $2 FOR UPDATE",
-        )
-        .bind(auth.team_id)
-        .bind(&successor_key)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((successor_id, successor_status, successor_claimed_by, successor_session, successor_lease)) = successor else {
+    )
+    .bind(auth.team_id)
+    .bind(&successor_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((
+        successor_id,
+        successor_status,
+        successor_claimed_by,
+        successor_session,
+        successor_lease,
+    )) = successor
+    else {
         return Err(BusError::not_found(format!(
             "successor task '{successor_key}' does not exist in this team"
         )));
@@ -1609,7 +1861,9 @@ pub async fn supersede_task(
         )));
     }
     if source_status == "cancelled" {
-        return Err(BusError::conflict(format!("task '{key}' is already cancelled")));
+        return Err(BusError::conflict(format!(
+            "task '{key}' is already cancelled"
+        )));
     }
     if !matches!(successor_status.as_str(), "open" | "claimed") {
         return Err(BusError::conflict(format!(

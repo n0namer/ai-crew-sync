@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{Bus, auth_of};
 use crate::{
-    model::{ClaimResult, TaskDetail, TaskInfo, TaskPageList},
+    model::{ClaimResult, TaskDetail, TaskInfo, TaskPageList, UpdateTaskResult},
     store::tasks,
 };
 
@@ -91,6 +91,30 @@ pub struct CreateTaskArgs {
     /// every dependency is done or cancelled, and claim_next_task skips it.
     #[serde(default)]
     pub depends_on: Vec<String>,
+}
+
+// Deserialise absent, null and concrete values as THREE different states.
+// serde's built-in Option<Option<T>> would otherwise collapse absent and null.
+fn deserialize_patch<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateTaskArgs {
+    pub key: String,
+    pub expected_revision: i64,
+    #[serde(default, deserialize_with = "deserialize_patch")]
+    pub title: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch")]
+    pub description: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch")]
+    #[schemars(schema_with = "crate::model::any_json_schema")]
+    pub metadata: Option<Option<serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -234,6 +258,31 @@ impl Bus {
         }))
     }
 
+    #[tool(
+        description = "Patch an existing nonterminal task without changing its key or ID.                        Requires exact expected_revision. Only the owning task session may                        modify a live-claimed task. Null clears description/metadata;                        unknown fields and empty updates are errors; no-op makes no audit event."
+    )]
+    async fn update_task(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<UpdateTaskArgs>,
+    ) -> Result<Json<UpdateTaskResult>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        Ok(Json(
+            tasks::update_task(
+                &self.db,
+                &auth,
+                &args.key,
+                tasks::UpdateInput {
+                    expected_revision: args.expected_revision,
+                    title: args.title,
+                    description: args.description,
+                    metadata: args.metadata,
+                },
+            )
+            .await?,
+        ))
+    }
+
     #[tool(description = "Get one task with its full history of claims and completions.")]
     async fn get_task(
         &self,
@@ -327,7 +376,9 @@ impl Bus {
         Parameters(args): Parameters<CancelTaskArgs>,
     ) -> Result<Json<TaskInfo>, ErrorData> {
         let auth = auth_of(&ctx)?;
-        Ok(Json(tasks::cancel_task(&self.db, &auth, &args.key, &args.reason).await?))
+        Ok(Json(
+            tasks::cancel_task(&self.db, &auth, &args.key, &args.reason).await?,
+        ))
     }
 
     #[tool(
@@ -354,7 +405,27 @@ impl Bus {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListTasksArgs, search_query_from_args, validate_search_args};
+    use super::{ListTasksArgs, UpdateTaskArgs, search_query_from_args, validate_search_args};
+
+    #[test]
+    fn update_patch_distinguishes_absent_null_and_values() {
+        let a: UpdateTaskArgs = serde_json::from_str(
+            r#"{"key":"k","expected_revision":3,"description":null,"metadata":null}"#,
+        )
+        .unwrap();
+        assert!(a.title.is_none());
+        assert!(matches!(a.description, Some(None)));
+        assert!(matches!(a.metadata, Some(None)));
+        let b: UpdateTaskArgs =
+            serde_json::from_str(r#"{"key":"k","expected_revision":3,"description":""}"#).unwrap();
+        assert!(matches!(b.description, Some(Some(ref t)) if t.is_empty()));
+        assert!(
+            serde_json::from_str::<UpdateTaskArgs>(
+                r#"{"key":"k","expected_revision":3,"unknown":"no"}"#
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn legacy_list_arguments_default_pagination_filters() {

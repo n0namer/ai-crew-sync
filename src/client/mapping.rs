@@ -234,6 +234,36 @@ pub fn to_call_with(
                 }),
             ),
             TaskCmd::Show { key } => ("get_task", json!({"key": key})),
+            TaskCmd::Update {
+                key,
+                expected_revision,
+                title,
+                description,
+                clear_description,
+                metadata_json,
+                clear_metadata,
+            } => {
+                let mut payload = serde_json::Map::new();
+                payload.insert("key".into(), json!(key));
+                payload.insert("expected_revision".into(), json!(expected_revision));
+                if let Some(title) = title {
+                    payload.insert("title".into(), json!(title));
+                }
+                if *clear_description {
+                    payload.insert("description".into(), Value::Null);
+                } else if let Some(description) = description {
+                    payload.insert("description".into(), json!(description));
+                }
+                if *clear_metadata {
+                    payload.insert("metadata".into(), Value::Null);
+                } else if let Some(raw) = metadata_json {
+                    let value: Value = serde_json::from_str(raw)
+                        .context("--metadata-json must contain valid JSON")?;
+                    payload.insert("metadata".into(), value);
+                }
+                // Do not compact: explicit null values are part of PATCH semantics.
+                return Ok(Some(("update_task", Value::Object(payload))));
+            }
             TaskCmd::Claim { key, lease_seconds } => (
                 "claim_task",
                 json!({"key": key, "lease_seconds": lease_seconds}),
@@ -246,11 +276,14 @@ pub fn to_call_with(
                 json!({"key": key, "lease_seconds": lease_seconds}),
             ),
             TaskCmd::Release { key } => ("release_task", json!({"key": key})),
-            TaskCmd::Cancel { key, reason } => (
-                "cancel_task",
-                json!({"key": key, "reason": reason}),
-            ),
-            TaskCmd::Supersede { key, successor_key, reason } => (
+            TaskCmd::Cancel { key, reason } => {
+                ("cancel_task", json!({"key": key, "reason": reason}))
+            }
+            TaskCmd::Supersede {
+                key,
+                successor_key,
+                reason,
+            } => (
                 "supersede_task",
                 json!({"key": key, "successor_key": successor_key, "reason": reason}),
             ),
@@ -296,13 +329,34 @@ mod tests {
     }
 
     #[test]
+    fn update_cli_preserves_explicit_null_and_revision() {
+        let (tool, args) = mapped(ClientCmd::Task(TaskCmd::Update {
+            key: "k".into(),
+            expected_revision: 4,
+            title: None,
+            description: None,
+            clear_description: true,
+            metadata_json: None,
+            clear_metadata: true,
+        }));
+        assert_eq!(tool, "update_task");
+        assert!(args["description"].is_null());
+        assert!(args["metadata"].is_null());
+        assert_eq!(args["expected_revision"], 4);
+        assert_eq!(args.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
     fn lifecycle_cli_commands_map_to_typed_mcp_tools() {
         let (tool, args) = mapped(ClientCmd::Task(TaskCmd::Cancel {
             key: "obsolete".into(),
             reason: "DUPLICATE".into(),
         }));
         assert_eq!(tool, "cancel_task");
-        assert_eq!(args, serde_json::json!({"key":"obsolete", "reason":"DUPLICATE"}));
+        assert_eq!(
+            args,
+            serde_json::json!({"key":"obsolete", "reason":"DUPLICATE"})
+        );
 
         let (tool, args) = mapped(ClientCmd::Task(TaskCmd::Supersede {
             key: "obsolete".into(),
@@ -310,7 +364,10 @@ mod tests {
             reason: "SUPERSEDED".into(),
         }));
         assert_eq!(tool, "supersede_task");
-        assert_eq!(args, serde_json::json!({"key":"obsolete", "successor_key":"canonical", "reason":"SUPERSEDED"}));
+        assert_eq!(
+            args,
+            serde_json::json!({"key":"obsolete", "successor_key":"canonical", "reason":"SUPERSEDED"})
+        );
     }
 
     #[test]
