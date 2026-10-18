@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod backend;
 pub mod conversations;
+pub mod daemon_settlement;
 pub mod digest;
 pub mod inbox;
 pub mod jetstream;
