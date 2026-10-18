@@ -2,6 +2,7 @@
  //! This API is deliberately store-internal until independent QA proof
  //! registration and server-side cryptographic verification are implemented.
 use sqlx::PgPool;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use crate::{auth::AuthCtx, error::{BusError, BusResult}};
 
@@ -41,6 +42,7 @@ pub async fn settle_strict(
     input: &StrictSettlement,
 ) -> BusResult<Uuid> {
     validate(input)?;
+    let result_sha256 = hex::encode(Sha256::digest(input.result.as_bytes()));
     let mut tx = pool.begin().await?;
     super::sessions::guard(&mut tx, auth).await?;
 
@@ -83,7 +85,7 @@ pub async fn settle_strict(
     let id: Option<(Uuid,)> = sqlx::query_as(
         r#"
         UPDATE tasks t
-        SET status = 'done', result = $1,
+        SET status = 'done', result = $1, revision = revision + 1,
             lease_expires_at = NULL, updated_at = now()
         FROM daemon_execution_fences f, daemon_qa_acceptances q
         WHERE t.team_id = $2 AND t.key = $3 AND t.status = 'claimed'
@@ -104,7 +106,7 @@ pub async fn settle_strict(
           AND q.fencing_token = f.fencing_token
           AND q.accepted = true AND q.consumed_at IS NULL
           AND q.expires_at > clock_timestamp()
-          AND q.review_digest = $11
+          AND q.review_digest = $11 AND q.result_sha256 = $12
           AND q.reviewer_agent_id <> $4
           AND q.reviewer_session <> $5
         RETURNING t.id
@@ -121,6 +123,7 @@ pub async fn settle_strict(
     .bind(input.owner_generation)
     .bind(&input.fencing_token)
     .bind(&input.qa_digest)
+    .bind(&result_sha256)
     .fetch_optional(&mut *tx)
     .await?;
     let Some((task_id,)) = id else {
@@ -133,7 +136,8 @@ pub async fn settle_strict(
         WHERE team_id = $1 AND task_id = $2 AND attempt_id = $3
           AND source_revision = $4 AND source_sha = $5
           AND owner_generation = $6 AND fencing_token = $7
-          AND review_digest = $8 AND accepted = true AND consumed_at IS NULL"#,
+          AND review_digest = $8 AND result_sha256 = $9
+          AND accepted = true AND consumed_at IS NULL"#,
     )
     .bind(auth.team_id)
     .bind(task_id)
@@ -143,6 +147,7 @@ pub async fn settle_strict(
     .bind(input.owner_generation)
     .bind(&input.fencing_token)
     .bind(&input.qa_digest)
+    .bind(&result_sha256)
     .execute(&mut *tx)
     .await?;
     if consumed.rows_affected() != 1 {

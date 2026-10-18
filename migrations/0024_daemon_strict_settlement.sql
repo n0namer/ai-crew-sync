@@ -33,6 +33,7 @@ CREATE TABLE daemon_qa_acceptances (
     reviewer_agent_id UUID NOT NULL,
     reviewer_session TEXT NOT NULL,
     review_digest TEXT NOT NULL CHECK (review_digest ~ '^[0-9a-f]{64}$'),
+    result_sha256 TEXT NOT NULL CHECK (result_sha256 ~ '^[0-9a-f]{64}$'),
     expires_at TIMESTAMPTZ NOT NULL,
     accepted BOOLEAN NOT NULL DEFAULT false,
     consumed_at TIMESTAMPTZ,
