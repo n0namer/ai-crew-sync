@@ -103,6 +103,9 @@ services:
       # Empty means "generate at startup": sessions end at restart and are not
       # shared between replicas. Set the same value everywhere in production.
       BUS_DASHBOARD_SECRET: ${BUS_DASHBOARD_SECRET:-}
+      # Stable HMAC signing key shared by every MCP replica and across restarts.
+      # Keep this separately from the dashboard secret in the ignored .env file.
+      TASK_CURSOR_SECRET: ${TASK_CURSOR_SECRET:?Set TASK_CURSOR_SECRET in the local .env file}
       # Empty by default: no broker, no JetStream, nothing to configure. Set
       # it to nats://nats:4222 together with NATS_REPLICAS=1 to make the
       # optional path available. It routes nobody on its own.
