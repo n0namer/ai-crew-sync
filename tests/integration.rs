@@ -14511,6 +14511,7 @@ async fn an_unreadable_body_is_labelled_for_the_model() {
 /// arithmetic spelled out rather than "insufficient storage resources"
 /// (#169).
 #[tokio::test]
+#[ignore = "requires dedicated JetStream fixture with 512 MiB max_file_store"]
 async fn small_quotas_let_several_teams_share_a_bounded_broker() {
     use ai_crew_sync::admin::{StreamQuotas, team_stream};
     use ai_crew_sync::store::jetstream::{self, Config, JetStreamBackend};
@@ -14592,6 +14593,7 @@ async fn small_quotas_let_several_teams_share_a_bounded_broker() {
 /// explicit, refused below what a stream holds, and never touches bodies
 /// or references (#169).
 #[tokio::test]
+#[ignore = "requires dedicated JetStream fixture with 512 MiB max_file_store"]
 async fn existing_quotas_are_kept_unless_updated_explicitly() {
     use ai_crew_sync::admin::{StreamQuotas, team_stream};
     use ai_crew_sync::store::jetstream::{self, Config, JetStreamBackend, StreamKind};

@@ -65,6 +65,28 @@ jobs:
           AI_CREW_SYNC_REQUIRE_NATS: "1"
           TEST_NATS_URL: nats://127.0.0.1:4222
           TASK_CURSOR_SECRET: test-only-cursor-signing-secret-for-ci-64-bytes-000000000000000000
+      - name: Quota tests on an isolated 512 MiB JetStream
+        env:
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/test
+          AI_CREW_SYNC_REQUIRE_DB: "1"
+          AI_CREW_SYNC_REQUIRE_NATS: "1"
+          TASK_CURSOR_SECRET: test-only-cursor-signing-secret-for-ci-64-bytes-000000000000000000
+        run: |
+          set -euo pipefail
+          for case in small_quotas_let_several_teams_share_a_bounded_broker existing_quotas_are_kept_unless_updated_explicitly; do
+            docker rm -f acs-nats-quota >/dev/null 2>&1 || true
+            docker run -d --name acs-nats-quota -p 14222:4222 \
+              -v "$PWD/Docker/nats-quota-test.conf:/etc/nats/nats.conf:ro" \
+              nats:2.12-alpine -js -c /etc/nats/nats.conf
+            ready=0
+            for i in $(seq 1 30); do
+              if docker logs acs-nats-quota 2>&1 | grep -q "Server is ready"; then ready=1; break; fi
+              sleep 1
+            done
+            if [ "$ready" -ne 1 ]; then docker logs acs-nats-quota; exit 1; fi
+            TEST_NATS_URL=nats://127.0.0.1:14222 cargo test --test integration "$case" -- --ignored --exact --test-threads=1
+            docker rm -f acs-nats-quota
+          done
 
   # The floor declared in Cargo.toml. A dependency bump or a language feature
   # needing a newer compiler fails HERE rather than in a user's `cargo install`.
@@ -122,6 +144,28 @@ jobs:
           AI_CREW_SYNC_REQUIRE_NATS: "1"
           TEST_NATS_URL: nats://127.0.0.1:4222
           TASK_CURSOR_SECRET: test-only-cursor-signing-secret-for-ci-64-bytes-000000000000000000
+      - name: Quota tests on an isolated 512 MiB JetStream
+        env:
+          TEST_DATABASE_URL: postgres://test:test@localhost:5432/test
+          AI_CREW_SYNC_REQUIRE_DB: "1"
+          AI_CREW_SYNC_REQUIRE_NATS: "1"
+          TASK_CURSOR_SECRET: test-only-cursor-signing-secret-for-ci-64-bytes-000000000000000000
+        run: |
+          set -euo pipefail
+          for case in small_quotas_let_several_teams_share_a_bounded_broker existing_quotas_are_kept_unless_updated_explicitly; do
+            docker rm -f acs-nats-quota >/dev/null 2>&1 || true
+            docker run -d --name acs-nats-quota -p 14222:4222 \
+              -v "$PWD/Docker/nats-quota-test.conf:/etc/nats/nats.conf:ro" \
+              nats:2.12-alpine -js -c /etc/nats/nats.conf
+            ready=0
+            for i in $(seq 1 30); do
+              if docker logs acs-nats-quota 2>&1 | grep -q "Server is ready"; then ready=1; break; fi
+              sleep 1
+            done
+            if [ "$ready" -ne 1 ]; then docker logs acs-nats-quota; exit 1; fi
+            TEST_NATS_URL=nats://127.0.0.1:14222 cargo test --test integration "$case" -- --ignored --exact --test-threads=1
+            docker rm -f acs-nats-quota
+          done
 
   # The compose file must render from its defaults alone — a bare `make up`
   # has to boot on a machine with no .env at all.

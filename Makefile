@@ -21,6 +21,8 @@ TEST_PG_NAME  = ai-crew-sync-test-pg
 # broker is a visible failure rather than a silent one.
 TEST_NATS_NAME  = ai-crew-sync-test-nats
 TEST_NATS_PORT ?= 14222
+TEST_NATS_QUOTA_PORT ?= 14223
+TEST_PG_QUOTA_PORT ?= 55433
 TEST_NATS_IMAGE = nats:2.12-alpine
 TEST_PG_PORT ?= 55432
 TEST_PG_IMAGE ?= postgres:18-alpine
@@ -107,7 +109,7 @@ recipes-check: ## Fail if a slash command drifted from its recipe
 	@python3 plugin/scripts/recipes.py check
 
 .PHONY: test
-test: ## Integration tests against a throwaway Postgres (needs docker)
+test: test-quota ## Integration tests against a throwaway Postgres (needs docker)
 	@docker rm -f $(TEST_PG_NAME) >/dev/null 2>&1 || true
 	@docker run -d --name $(TEST_PG_NAME) -p $(TEST_PG_PORT):5432 \
 		-e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test \
@@ -127,6 +129,32 @@ test: ## Integration tests against a throwaway Postgres (needs docker)
 		status=$$?; \
 		docker rm -f $(TEST_PG_NAME) >/dev/null; \
 		docker rm -f $(TEST_NATS_NAME) >/dev/null; \
+		exit $$status
+
+.PHONY: test-quota
+test-quota: ## Broker quota tests on separate disposable PostgreSQL and 512 MiB JetStream
+	@docker rm -f $(TEST_NATS_NAME)-quota $(TEST_PG_NAME)-quota >/dev/null 2>&1 || true
+	@docker run -d --name $(TEST_PG_NAME)-quota -p $(TEST_PG_QUOTA_PORT):5432 \
+		-e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test \
+		$(TEST_PG_IMAGE) >/dev/null
+	@until docker exec $(TEST_PG_NAME)-quota pg_isready -U test >/dev/null 2>&1; do sleep 1; done
+	@docker run -d --name $(TEST_NATS_NAME)-quota -p $(TEST_NATS_QUOTA_PORT):4222 \
+		-v "$(PWD)/Docker/nats-quota-test.conf:/etc/nats/nats.conf:ro" \
+		$(TEST_NATS_IMAGE) -js -c /etc/nats/nats.conf >/dev/null
+	@until docker logs $(TEST_NATS_NAME)-quota 2>&1 | grep -q 'Server is ready'; do sleep 1; done
+	@AI_CREW_SYNC_REQUIRE_DB=1 AI_CREW_SYNC_REQUIRE_NATS=1 \
+		TEST_DATABASE_URL=postgres://test:test@localhost:$(TEST_PG_QUOTA_PORT)/test \
+		TEST_NATS_URL=nats://127.0.0.1:$(TEST_NATS_QUOTA_PORT) \
+		cargo test --test integration small_quotas_let_several_teams_share_a_bounded_broker -- --ignored --exact --test-threads=1; \
+		status=$$?; \
+		if [ "$$status" -eq 0 ]; then \
+			AI_CREW_SYNC_REQUIRE_DB=1 AI_CREW_SYNC_REQUIRE_NATS=1 \
+			TEST_DATABASE_URL=postgres://test:test@localhost:$(TEST_PG_QUOTA_PORT)/test \
+			TEST_NATS_URL=nats://127.0.0.1:$(TEST_NATS_QUOTA_PORT) \
+			cargo test --test integration existing_quotas_are_kept_unless_updated_explicitly -- --ignored --exact --test-threads=1; \
+			status=$$?; \
+		fi; \
+		docker rm -f $(TEST_NATS_NAME)-quota $(TEST_PG_NAME)-quota >/dev/null; \
 		exit $$status
 
 # --- build and run ----------------------------------------------------------
