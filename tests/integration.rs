@@ -28,6 +28,23 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+static TEST_EXTENSIONS: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_test_extensions(pool: &PgPool) {
+    TEST_EXTENSIONS
+        .get_or_init(|| async {
+            sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public")
+                .execute(pool)
+                .await
+                .expect("install pgcrypto in public schema");
+            sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
+                .execute(pool)
+                .await
+                .expect("install pg_trgm in public schema");
+        })
+        .await;
+}
+
 fn db_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -174,9 +191,11 @@ async fn setup_with(schema: &str, nats: Option<String>) -> Option<Harness> {
             move |conn, _| {
                 let schema = schema.clone();
                 Box::pin(async move {
-                    sqlx::query(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-                        .execute(&mut *conn)
-                        .await?;
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SET search_path TO {schema}, public"
+                    )))
+                    .execute(&mut *conn)
+                    .await?;
                     Ok(())
                 })
             }
@@ -195,6 +214,7 @@ async fn setup_with(schema: &str, nats: Option<String>) -> Option<Harness> {
         .execute(&pool)
         .await
         .unwrap();
+    ensure_test_extensions(&pool).await;
     MIGRATOR.run(&pool).await.expect("migrate");
 
     let ct = CancellationToken::new();
@@ -367,9 +387,11 @@ async fn setup_rate_limited(schema: &str, per_minute: u32) -> Option<Harness> {
             move |conn, _| {
                 let schema = schema.clone();
                 Box::pin(async move {
-                    sqlx::query(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-                        .execute(&mut *conn)
-                        .await?;
+                    sqlx::query(sqlx::AssertSqlSafe(format!(
+                        "SET search_path TO {schema}, public"
+                    )))
+                    .execute(&mut *conn)
+                    .await?;
                     Ok(())
                 })
             }
@@ -387,6 +409,7 @@ async fn setup_rate_limited(schema: &str, per_minute: u32) -> Option<Harness> {
         .execute(&pool)
         .await
         .unwrap();
+    ensure_test_extensions(&pool).await;
     MIGRATOR.run(&pool).await.expect("migrate");
 
     let ct = CancellationToken::new();
@@ -11530,9 +11553,11 @@ async fn a_listener_that_went_deaf_is_noticed_and_reattached() {
         .after_connect(move |conn, _| {
             let schema = schema.clone();
             Box::pin(async move {
-                sqlx::query(sqlx::AssertSqlSafe(format!("SET search_path TO {schema}")))
-                    .execute(&mut *conn)
-                    .await?;
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SET search_path TO {schema}, public"
+                )))
+                .execute(&mut *conn)
+                .await?;
                 Ok(())
             })
         })

@@ -540,10 +540,9 @@ async fn fetch_all_task_pages(
         if let (Some(target), Some(tasks)) = (
             combined.as_object_mut(),
             page.get("tasks").and_then(Value::as_array),
-        ) {
-            if let Some(existing) = target.get_mut("tasks").and_then(Value::as_array_mut) {
-                existing.extend(tasks.iter().cloned());
-            }
+        ) && let Some(existing) = target.get_mut("tasks").and_then(Value::as_array_mut)
+        {
+            existing.extend(tasks.iter().cloned());
         }
 
         if page_exhausted {

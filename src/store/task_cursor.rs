@@ -12,7 +12,7 @@ const CURSOR_VERSION: u8 = 1;
 const MAC_SIZE: usize = 32;
 const MAX_SEARCH_BYTES: usize = 512;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskCursorFilters {
     pub project_prefix: Option<String>,
     pub status: Option<String>,
@@ -25,20 +25,6 @@ pub struct TaskCursorFilters {
     pub search_fields: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_language: Option<String>,
-}
-
-impl Default for TaskCursorFilters {
-    fn default() -> Self {
-        Self {
-            project_prefix: None,
-            status: None,
-            mine: false,
-            search: None,
-            search_mode: None,
-            search_fields: None,
-            search_language: None,
-        }
-    }
 }
 
 impl TaskCursorFilters {

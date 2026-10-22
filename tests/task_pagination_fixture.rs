@@ -16,6 +16,8 @@ pub struct Fixture {
     pub pool: PgPool,
     pub team_id: Uuid,
     pub agent_id: Uuid,
+    // Shared fixture field used by ACL-focused tests in sibling integration binaries.
+    #[allow(dead_code)]
     pub other_agent_id: Uuid,
     pub task_prefix: String,
 }
@@ -181,6 +183,7 @@ pub async fn populate_2000_tasks(fixture: &Fixture) -> Result<Vec<String>, sqlx:
     Ok(keys)
 }
 
+#[allow(dead_code)]
 pub async fn seed_expiring_lease(fixture: &Fixture, key: &str) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO tasks (team_id, key, title, status, claimed_by, claimed_at, lease_expires_at, created_by) VALUES ($1, $2, $3, 'claimed', $4, now(), now() - interval '1 second', $4)").bind(fixture.team_id).bind(key).bind("expired lease fixture task").bind(fixture.agent_id).execute(&fixture.pool).await?;
     Ok(())
