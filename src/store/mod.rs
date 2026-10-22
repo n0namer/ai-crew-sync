@@ -15,6 +15,7 @@ pub mod routing;
 pub mod sessions;
 pub mod task_cursor;
 pub mod tasks;
+pub mod project_order;
 
 pub mod attachments;
 

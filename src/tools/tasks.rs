@@ -3,7 +3,7 @@ use rmcp::{
     tool_router,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Bus, auth_of};
 use crate::{
@@ -159,8 +159,64 @@ pub struct CompleteTaskArgs {
     pub result: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaceProjectOrderArgs {
+    /// Canonical project ID. Only tasks from this project may enter its explicit queue.
+    pub project: String,
+    /// Last read queue revision; stale changes are rejected.
+    pub expected_revision: i64,
+    /// Existing CrewSync task keys in the exact approved execution order.
+    pub task_keys: Vec<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProjectOrderArgs { pub project: String }
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ClaimProjectOrderedArgs {
+    pub project: String,
+    #[serde(default)]
+    pub lease_seconds: Option<i64>,
+}
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ProjectOrderView {
+    pub project: String,
+    pub revision: i64,
+    pub task_keys: Vec<String>,
+}
+
 #[tool_router(router = tasks_router, vis = "pub")]
-impl Bus {
+impl Bus {    #[tool(description = "Read the explicitly approved ordered queue for one project, including its revision. An absent queue has revision 0 and no tasks.")]
+    async fn get_project_task_order(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<ProjectOrderArgs>,
+    ) -> Result<Json<ProjectOrderView>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        let (revision,task_keys) = crate::store::project_order::get_order(&self.db,&auth,&args.project).await?;
+        Ok(Json(ProjectOrderView {project: args.project,revision,task_keys}))
+    }
+
+    #[tool(description = "Atomically replace an approved per-project task order using exact existing task IDs and optimistic revision fencing. Rejects active claims, foreign projects and stale revisions.")]
+    async fn replace_project_task_order(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<ReplaceProjectOrderArgs>,
+    ) -> Result<Json<ProjectOrderView>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        let revision = crate::store::project_order::replace_order(&self.db,&auth,&args.project,args.expected_revision,&args.task_keys).await?;
+        Ok(Json(ProjectOrderView {project: args.project,revision,task_keys:args.task_keys}))
+    }
+
+    #[tool(description = "Atomically claim the first unfinished task in an explicitly approved project queue. Does not skip a blocked or claimed preceding task. Never consumes unrelated or unscheduled backlog.")]
+    async fn claim_next_project_ordered_task(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<ClaimProjectOrderedArgs>,
+    ) -> Result<Json<ClaimResult>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        Ok(Json(crate::store::project_order::claim_next_ordered(&self.db,&auth,&args.project,args.lease_seconds).await?))
+    }
+
+
     #[tool(
         description = "Register a unit of shared work so the team can coordinate on it. \
                        Creating a task does not claim it. Use depends_on to chain work \
