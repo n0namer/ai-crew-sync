@@ -276,11 +276,20 @@ pub async fn resolve_token(pool: &PgPool, raw: &str) -> Result<AuthCtx, AuthErro
         return Err(AuthError::Disabled);
     }
 
-    // Best-effort: record usage without blocking the request path on failure.
-    let _ = sqlx::query("UPDATE api_tokens SET last_used_at = now() WHERE id = $1")
-        .bind(row.token_id)
-        .execute(pool)
-        .await;
+    // Best-effort token usage tracking, following the already established
+    // agent_sessions pattern below. Avoid a hot-row write on every auth.
+    let _ = sqlx::query(
+        "UPDATE api_tokens SET last_used_at = now()
+          WHERE id IN (
+              SELECT id FROM api_tokens
+               WHERE id = $1
+                 AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds')
+               FOR UPDATE SKIP LOCKED
+          )",
+    )
+    .bind(row.token_id)
+    .execute(pool)
+    .await;
 
     Ok(AuthCtx {
         agent_id: row.agent_id,

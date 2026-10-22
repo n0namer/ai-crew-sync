@@ -10,6 +10,7 @@ pub mod migrate;
 pub mod notes;
 pub mod outbox;
 pub mod presence;
+pub mod project_order;
 pub mod quota;
 pub mod routing;
 pub mod sessions;

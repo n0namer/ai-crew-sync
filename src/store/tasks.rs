@@ -995,6 +995,15 @@ pub async fn claim_task(
                OR (claimed_by = $1 AND COALESCE(claimed_session, '') = $5)
                OR lease_expires_at IS NULL
                OR lease_expires_at < now())
+          -- An explicitly approved project queue owns initial admission.
+          -- The original session may still re-claim to renew its held lease.
+          AND (
+              NOT EXISTS (SELECT 1 FROM project_task_order_entries e
+                          WHERE e.team_id=tasks.team_id AND e.task_id=tasks.id)
+              OR (status = 'claimed' AND claimed_by = $1
+                  AND COALESCE(claimed_session, '') = $5
+                  AND lease_expires_at > now())
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
@@ -1135,6 +1144,9 @@ pub async fn claim_next_task(
             WHERE team_id = $1
               AND (status = 'open'
                    OR (status = 'claimed' AND lease_expires_at < now()))
+              -- Do not steal an approved project queue task via global FIFO.
+              AND NOT EXISTS (SELECT 1 FROM project_task_order_entries e
+                              WHERE e.team_id=tasks.team_id AND e.task_id=tasks.id)
               AND NOT EXISTS (
                   SELECT 1
                   FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
