@@ -157,7 +157,7 @@ fn cursor_ttl_rejects_not_yet_valid_and_expired_boundaries() {
 
 #[test]
 fn status_rank_order_is_total_and_keyset_boundary_is_strict() {
-    let mut rows = vec![
+    let mut rows = [
         TaskOrder::from_sql(2, 200, "team-alpha:task-b"),
         TaskOrder::from_sql(1, 100, "team-alpha:task-z"),
         TaskOrder::from_sql(1, 200, "team-alpha:task-c"),

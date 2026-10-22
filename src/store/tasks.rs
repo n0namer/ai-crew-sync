@@ -7,9 +7,7 @@ use crate::{
     model::{ClaimResult, TaskDetail, TaskEventInfo, TaskInfo, TaskList, ts, ts_opt},
 };
 
-#[path = "task_cursor.rs"]
-mod task_cursor;
-use task_cursor::{
+use super::task_cursor::{
     CursorLifetime, TaskCursorContext, TaskCursorFilters, TaskOrder, decode_cursor_at,
     encode_cursor_with_lifetime,
 };
@@ -582,6 +580,7 @@ fn search_clause(search: Option<&NormalizedSearch>) -> String {
     }
 }
 
+#[cfg(test)]
 fn search_cursor_binding(project_prefix: Option<&str>, search: &NormalizedSearch) -> String {
     serde_json::to_string(&(
         project_prefix,
