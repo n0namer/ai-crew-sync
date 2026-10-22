@@ -64,6 +64,7 @@ jobs:
           AI_CREW_SYNC_REQUIRE_DB: "1"
           AI_CREW_SYNC_REQUIRE_NATS: "1"
           TEST_NATS_URL: nats://127.0.0.1:4222
+          CREWSYNC_TEST_BROKER_STORE_MIB: "8192"
           TASK_CURSOR_SECRET: test-only-cursor-signing-secret-for-ci-64-bytes-000000000000000000
 
   # The floor declared in Cargo.toml. A dependency bump or a language feature
@@ -121,6 +122,7 @@ jobs:
           AI_CREW_SYNC_REQUIRE_DB: "1"
           AI_CREW_SYNC_REQUIRE_NATS: "1"
           TEST_NATS_URL: nats://127.0.0.1:4222
+          CREWSYNC_TEST_BROKER_STORE_MIB: "8192"
           TASK_CURSOR_SECRET: test-only-cursor-signing-secret-for-ci-64-bytes-000000000000000000
 
   # The compose file must render from its defaults alone — a bare `make up`

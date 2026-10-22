@@ -123,7 +123,7 @@ test: ## Integration tests against a throwaway Postgres (needs docker)
 	@until docker logs $(TEST_NATS_NAME) 2>&1 | grep -q 'Server is ready'; do sleep 1; done
 	@AI_CREW_SYNC_REQUIRE_DB=1 AI_CREW_SYNC_REQUIRE_NATS=1 \
 		TEST_DATABASE_URL=postgres://test:test@localhost:$(TEST_PG_PORT)/test \
-		TEST_NATS_URL=nats://127.0.0.1:$(TEST_NATS_PORT) cargo test; \
+		TEST_NATS_URL=nats://127.0.0.1:$(TEST_NATS_PORT) CREWSYNC_TEST_BROKER_STORE_MIB=8192 cargo test; \
 		status=$$?; \
 		docker rm -f $(TEST_PG_NAME) >/dev/null; \
 		docker rm -f $(TEST_NATS_NAME) >/dev/null; \

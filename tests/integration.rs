@@ -14505,8 +14505,18 @@ async fn an_unreadable_body_is_labelled_for_the_model() {
     h.shutdown().await;
 }
 
+fn test_broker_store_ceiling_mib() -> i64 {
+    // 512 MiB for an isolated quota broker; 8192 MiB for the full CI broker.
+    // Refusals are tested against the real configured storage ceiling.
+    let configured =
+        std::env::var("CREWSYNC_TEST_BROKER_STORE_MIB").unwrap_or_else(|_| "512".to_owned());
+    let mib: i64 = configured.parse().expect("valid broker quota test ceiling");
+    assert!((512..=16_384).contains(&mib), "invalid broker test ceiling");
+    mib
+}
+
 /// Small teams fit on a small broker: three teams provisioned with explicit
-/// quotas on the fixture's 512 MiB store, each stream carrying exactly the
+/// quotas on the configured broker storage budget, each stream carrying exactly the
 /// limits asked for, and a quota the store cannot reserve refused with the
 /// arithmetic spelled out rather than "insufficient storage resources"
 /// (#169).
@@ -14551,12 +14561,12 @@ async fn small_quotas_let_several_teams_share_a_bounded_broker() {
         assert_eq!(info.config.max_messages, 2_000, "{slug} inbox");
     }
 
-    // The fixture's store is 512 MiB; 3 × 36 MiB are reserved. Asking for
-    // 480 MiB more is refused by the broker, and the error says why in
+    // Three 36 MiB teams are reserved on the configured broker. Asking for
+    // the full store limit again is refused by the broker, and the error says why in
     // terms an operator can act on.
     seed_agent(&h.pool, "greedy", "x").await;
     let greedy = StreamQuotas {
-        max_bytes: 480 * mib,
+        max_bytes: test_broker_store_ceiling_mib() * mib,
         ..small
     };
     let err = team_stream(&h.pool, "greedy", &nats_url(), None, false, greedy, false)
@@ -14744,13 +14754,13 @@ async fn existing_quotas_are_kept_unless_updated_explicitly() {
     );
 
     // A change the broker cannot reserve leaves the team as it was: the
-    // fixture's store is 512 MiB, and 480 MiB for the inbox on top of
+    // configured broker store limit for the inbox on top of
     // 64 MiB for bodies does not fit. The fixture's account has no budget
     // of its own, so the refusal comes from the broker when the inbox is
     // updated, after the body stream was; the command restores the body
     // stream and says so. Both keep their limits.
     let too_much = StreamQuotas {
-        inbox_max_bytes: 480 * mib,
+        inbox_max_bytes: test_broker_store_ceiling_mib() * mib,
         ..other
     };
     let err = team_stream(&h.pool, "acme", &nats_url(), None, false, too_much, true)
