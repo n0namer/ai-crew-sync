@@ -1,0 +1,1344 @@
+﻿diff --git a/_bmad-output/implementation-artifacts/spec-crewsync-project-ordered-queue.md b/_bmad-output/implementation-artifacts/spec-crewsync-project-ordered-queue.md
+new file mode 100644
+index 0000000..f57a49a
+--- /dev/null
++++ b/_bmad-output/implementation-artifacts/spec-crewsync-project-ordered-queue.md
+@@ -0,0 +1,96 @@
++---
++title: 'CrewSync explicit per-project task order for one portfolio Mini Daemon'
++type: 'feature'
++created: '2026-10-13'
++status: 'in-progress'
++baseline_commit: '34a2c3e'
++review_loop_iteration: 0
++context: []
++---
++
++<frozen-after-approval reason="User-authorized continued execution: implement existing project-scoped queue without introducing another scheduler">
++
++## Intent
++
++**Problem:** The current CrewSync claim_next_task selects the oldest available task across all projects. The global Mini Daemon would therefore execute unrelated historical OPEN tasks instead of an explicitly approved order within the selected project.
++
++**Approach:** Add the smallest additive **server-owned ordered queue per project**. An authorized coordinator can replace the exact ordered list of existing CrewSync task IDs using a revision fence; the global daemon selects a project and asks CrewSync to atomically claim its next ordered task. Existing task results, dependencies, leases and claim semantics stay canonical in CrewSync.
++
++## Boundaries & Constraints
++
++**Always:** Use existing CrewSync task keys and tenant boundaries. No task auto-enrollment; approved order is independent of created_at. Fixed next task is a barrier while claimed or dependency-blocked. Two different projects can claim concurrently; workers within one project cannot bypass the barrier. Revisions are CAS-style; reordering cannot invalidate a live writer. No hidden fallback to global claim_next_task. Long results stay in existing result/notes.
++
++**Ask First:** Changes to operational service or live database; silent migration of historical backlog; non-FIFO parallel groups or any reinterpretation of approved order.
++
++**Never:** New scheduling database outside CrewSync, duplicate task DAG, re-creating CrewSync tasks, Ruflo Mission M2 dependency, edits in the owner's dirty source checkout, production deploy/redeploy before GREEN.
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|---|---|---|---|
++| Approved order | Project P: tasks A,B,C created chronologically, order C,A,B approved | P claims C; B cannot jump past C/A | Exact project, tenant and revision checked |
++| Other project | Projects P and Q have independent queues | Q progresses while P is blocked | No cross-project task access |
++| No order | OPEN backlog exists but project queue is absent or explicitly empty | No task claimed | Fail closed, no global FIFO fallback |
++| Stale revision | Two coordinators change order from revision N | First commits N+1; second is refused | Conflict with current revision |
++| Active claim | Task in queue is actively claimed | Existing owner unaffected; no reordering | Reject revision change |
++| Dependency | Earlier task depends on unfinished predecessor | Later queue tasks do not jump ahead | No claim until prerequisite terminal |
++| Omitted unfinished dependency | Task A depends on unlisted same-project task B, still OPEN | Reject plan as deadlock-prone | Actionable dependency error |
++| Out-of-order dependency | A depends on B but order is [A,B] | Reject impossible strict ordering | Actionable validation error |
++| Completion | Earlier accepted task becomes done | Next queue member can be claimed | Atomic claim preserves lease/session |
++| Corrupt input | duplicate/wrong-team/wrong-project task keys | No partial queue change | Full transaction rollback |
++
++</frozen-after-approval>
++
++## Code Map
++
++- migrations/0001_init.sql — baseline tasks, team ACL, task events.
++- migrations/0022_task_cancel_supersede_audit.sql + migrations/0023_project_task_order.sql — lifecycle audit/status schema remains the prerequisite; ordered queue is additive and uses its team/task uniqueness constraint.
++- src/store/tasks.rs — existing global FIFO and named claim; preserve compatibility for unplanned tasks while refusing initial claims of enrolled keys.
++- src/store/project_order.rs — scoped transactional read/replace/claim with DONE-only prerequisite/head completion, explicit replan barriers, and atomic rejection of newly proposed cancelled/superseded rows.
++- src/store/mod.rs — existing module registry.
++- src/tools/tasks.rs — existing MCP router, additive ordered-queue tools while preserving cancellation and supersession tools.
++- tests/project_task_order.rs — isolated database E2E and validation.
++- docs/acceptance/PROJECT_ORDERED_QUEUE.md — operator boundary, not a parallel PLAN.md.
++- Original main untracked BMad pagination/search specs are other concurrent work; do not modify.
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] migrations/0022_task_cancel_supersede_audit.sql + migrations/0023_project_task_order.sql — lifecycle audit/status schema and additive ordered queue coexist; strict team/project/position uniqueness and FK.
++- [x] src/store/project_order.rs — validate input and dependencies; transactional CAS replacement rejects newly proposed cancelled/superseded rows before mutation, preserves order/revision on rejection, and keeps atomic project-scoped claims.
++- [x] src/store/mod.rs + src/tools/tasks.rs — export get/replace/claim MCP tools, typed request and view.
++- [x] src/store/tasks.rs — legacy claim_next_task excludes enrolled tasks, named claim_task only permits renewal by exact existing holder, and lifecycle dependency guards remain DONE-only.
++- [x] tests/project_task_order.rs + tests/project_task_order_adversarial.rs — prove ordering, independent projects, stale revisions, claim concurrency, blocked/recovery behavior, tenant isolation, invalid order, explicit empty queue, and cancelled/superseded fail-closed paths.
++- [x] docs/acceptance/PROJECT_ORDERED_QUEUE.md — small operator contract for Mini Daemon (project selection remains outside server).
++
++**Acceptance Criteria:**
++- Given P contains task keys [P:A,P:B,P:C] created in any order, when order [P:C,P:A,P:B] is committed at expected revision 0, then claim_next_project_ordered_task(P) issues C first.
++- Given P has a claimed or blocked head, when a second worker requests P, then it receives no claim rather than A/B or another project's task.
++- Given Q has an independently approved order, when P is blocked, then Q can claim its own head.
++- Given an absent or empty queue, when claim is requested, then nothing from the legacy backlog is claimed.
++- Given a task in an approved order, when a legacy named/global claim attempts to bypass ordered admission, then it is refused while a genuine holder may renew.
++- Given concurrent stale planners or invalid dependency order, when they attempt replace, then no partial mutation is visible.
++- Given a cancelled or superseded prerequisite/head, when ordered claim or replacement is attempted, then the queue fails closed and requires explicit replan; only DONE satisfies readiness.
++- Given a newly proposed cancelled or superseded task, when replace_order runs at the current or stale revision, then it rejects without changing the existing order or revision.
++- Given migration and code, when containerized cargo check/tests run, then they complete GREEN without changing the deployed service.
++
++## Spec Change Log
++
++- 2026-10-13: Resumed already-started isolated per-project queue implementation. User specifically chose CrewSync as queue authority for one global multi-project Mini Daemon.
++- 2026-10-13: Added focused blocked-head recovery coverage; implementation remains a candidate pending coordinator Docker Rust/PostgreSQL verification and independent QA.
++- 2026-10-13: Resolved lifecycle/project-order merge markers, preserved cancellation and supersession APIs, and made queue prerequisites and heads DONE-only; cancelled or superseded work now requires explicit replan.
++- 2026-10-13: Independent QA required repair: reject newly proposed cancelled/superseded rows before an ordered replan mutates entries or revision; adversarial regression verifies both terminal statuses and stale revision preservation. No deploy or acceptance action was performed.
++- 2026-10-13: Lifecycle/order convergence pass restored `superseded` support in the legacy task-list status filter and added public cancellation-head coverage proving later ordered work remains blocked until explicit replan. The scoped runner again refused Rust integration tests with `test_file_not_allowed`; host PostgreSQL verification remains required.
++
++## Design Notes
++
++Only replace explicit per-project position lists. Selecting which project should be served is already portfolio-level responsibility of GO Core; do not add a competing dispatcher to CrewSync. Strict per-project serial barriers deliberately prioritize predictable approved order; parallel branch semantics can be added only with explicit approval.
++
++## Verification
++
++**Commands:**
++- Docker rust:1.98.1-slim cargo check --locked --offline — compile without touching live service.
++- Cargo tests for project_task_order against isolated ephemeral PostgreSQL.
++- git diff --check and independent adversarial/edge-case review before commit.
++
++**Current gate:** Candidate implementation prepared; focused SQL E2E is coordinator-owned and pending because the scoped runner denied the Rust integration test. Independent QA and production gates remain pending.
+diff --git a/docs/acceptance/PROJECT_ORDERED_QUEUE.md b/docs/acceptance/PROJECT_ORDERED_QUEUE.md
+new file mode 100644
+index 0000000..fe59d34
+--- /dev/null
++++ b/docs/acceptance/PROJECT_ORDERED_QUEUE.md
+@@ -0,0 +1,43 @@
++# CrewSync server-owned ordered task queues
++
++## Status
++
++Candidate implementation in isolated branch `feat/crewsync-project-ordered-queue-20261013`.
++Not deployed. The existing CrewSync server and historic global FIFO remain unchanged until an independently accepted promotion. Migration `0022_task_cancel_supersede_audit.sql` remains the lifecycle prerequisite; `0023_project_task_order.sql` is additive and relies on its team/task uniqueness constraint.
++
++## Problem and rule
++
++CrewSync `claim_next_task` currently selects by `created_at` across the whole team. A portfolio Mini Daemon must not use it to consume the large unrelated OPEN backlog. Each project instead has one **explicit approved ordered list of existing CrewSync task keys**.
++
++One global GO Core Mini Daemon may distribute resource slots across all projects; this new CrewSync API only answers: given a chosen project, which is its first unfinished approved task? The answer is transactional and respects claims and task dependencies.
++
++## MCP API
++
++These new tool names are additive:
++
++1. `get_project_task_order({ "project": "gocore" })` returns `revision` and ordered `task_keys`. An absent queue returns revision 0, empty list.
++2. `replace_project_task_order({ "project": "gocore", "expected_revision": 0, "task_keys": ["gocore:task-B","gocore:task-A"] })` creates revision 1. Tasks **must already exist**. Repeat with fresh revision to change ordering. Empty list is a deliberate project pause.
++3. `claim_next_project_ordered_task({ "project": "gocore", "lease_seconds": 900 })` atomically claims the first unfinished listed task. If it is blocked or actively claimed, returns `claimed:false`, never a later task or a different project.
++
++Read revision, submit change with exact expected revision, then re-read. A stale revision, foreign/duplicate task, inconsistent internal dependency, active claim, newly proposed `cancelled`/`superseded` task, or unauthorized agent is rejected atomically without changing the current order or revision.
++
++Only authenticated agent `coordinator` may submit plan changes or claim from the ordered queue; other agents may read it. Task results still use existing CrewSync `result`, `notes` and immutable evidence references.
++
++## Semantics and replan
++
++- **No implicit enrollment:** old OPEN cards stay outside approved project queues, regardless of age.
++- **Sequential per project:** only `done` satisfies the queue barrier. A `cancelled` or `superseded` head remains blocking and requires an explicit coordinator replan; it is never silently treated as accepted work. When blocked by dependencies or held by another session the API reports no claim. This prevents priority inversion.
++- **Prerequisites:** only `done` resolves a dependency. Cancellation and supersession trigger replan rather than false successor acceptance.
++- **Parallel across projects:** each project has a distinct row lock; while `gocore` is blocked, `ultra` may claim its independent head.
++- **No omitted prerequisites:** if a task depends on another same-project task that is not `done`, that prerequisite must appear earlier in the approved order. A `cancelled` or `superseded` prerequisite is not accepted completion and requires replan.
++- **Terminal admission:** a new approved order rejects `cancelled` and `superseded` task rows atomically; the previous order and revision remain unchanged. Replanning may remove such historical entries, but never silently admits them as new work.
++- **CAS replan:** the impact analyzer may propose the next exact order after independent acceptance. The coordinator must wait for own/foreign live claims to terminate, then call replace with the last observed revision. The server stores an immutable snapshot in `project_task_order_revisions`.
++- **Historical jobs:** do not mark any OPEN item READY merely because it exists; governance/registry/dirty-worktree checks remain obligations of the Mini Daemon before selecting a project or running a worker.
++- **Legacy operations:** global `claim_next_task` skips enrolled project tasks, while named `claim_task` refuses their initial claim. Only the already authorized session may renew an enrolled task with the named claim API. Both original APIs remain available for tasks outside all approved orders. Mini Daemon must use the new ordered API exclusively and treat any legacy fallback as a configuration error.
++- **Parallel branches inside one project** are not part of this strict FIFO DoD. A later revision or explicit separate queue lanes may add parallelism, with conflict and dependency proof.
++
++## Validation and deployment gate
++
++Run `cargo check --locked --offline`, `cargo test --locked --offline --test project_task_order`, `cargo test --locked --offline --test project_task_order_adversarial`, and `cargo test --locked --offline --test task_cancel_supersede` using the project's cached Rust Docker image and a **new ephemeral PostgreSQL** database. No test should use `docker-postgres-1` or the running CrewSync database. Test cases include out-of-creation order, project isolation, stale planners, active claims, forward dependencies, blocked-head recovery, explicit cancellation/supersession replans, legacy lifecycle-status listing, and concurrent claims. The scoped GO runner denied the Rust integration test with `test_file_not_allowed`; coordinator Docker verification is required before acceptance.
++
++Before enabling in production: independent adversarial + edge-case review, exact live service binary/version and migration preflight, backup/reversal strategy, QA-approved integration with global Mini Daemon's project selection. This worker result is a CANDIDATE only; coordinator and independent QA own acceptance. Do not restart/redeploy CrewSync before these gates are GREEN.
+diff --git a/docs/acceptance/PROJECT_ORDERED_QUEUE_INDEPENDENT_QA.md b/docs/acceptance/PROJECT_ORDERED_QUEUE_INDEPENDENT_QA.md
+new file mode 100644
+index 0000000..c947a1c
+--- /dev/null
++++ b/docs/acceptance/PROJECT_ORDERED_QUEUE_INDEPENDENT_QA.md
+@@ -0,0 +1,73 @@
++# Independent QA — project ordered queue
++
++## Verdict
++
++**REPAIR_REQUIRED** — do not promote this candidate until every claim path treats a
++`superseded` prerequisite as terminal, matching the documented queue contract.
++
++## Scope and method
++
++This independent review inspected only the candidate migration, project-order store,
++legacy claim guards, MCP route, specification, acceptance contract, and existing
++isolated PostgreSQL tests. It applied adversarial review (attempted bypasses and
++transaction races) and path tracing (terminal states, missing dependencies, tenant
++boundaries, revision transitions, and lock outcomes). No production database,
++CrewSync task, lease, or implementation source was modified.
++
++## Concrete defect
++
++1. **A superseded prerequisite can be omitted during planning but permanently blocks
++   execution.** `replace_order` explicitly considers `superseded` terminal when it
++   checks a same-project prerequisite outside the approved list
++   (`src/store/project_order.rs:145`). The ordered claim update instead accepts only
++   `done` and `cancelled` prerequisites (`src/store/project_order.rs:252`). The
++   legacy named and global claim paths repeat the same two-state predicate
++   (`src/store/tasks.rs:1010`, `src/store/tasks.rs:1134`). This contradicts the
++   operator contract that a queue advances once its head becomes
++   `done/cancelled/superseded` (`docs/acceptance/PROJECT_ORDERED_QUEUE.md:27`) and
++   makes an approved queue unrecoverably blocked after legitimate supersession.
++
++   Required repair: define one shared terminal-prerequisite rule and apply it to
++   ordered, named, and global claim predicates. Keep the head-selection rule and
++   dependency-omission validation aligned with that same terminal set.
++
++## Focused adversarial probes
++
++| Probe | Evidence | Result |
++| --- | --- | --- |
++| SQL replan versus ordered claim | Both operations lock the project row before touching queue/task state (`src/store/project_order.rs:70`, `src/store/project_order.rs:218`). | Guard present; concurrent claimant fails closed while the row is locked. |
++| Stale revision / partial mutation | Revision comparison happens before entry deletion and transaction commit (`src/store/project_order.rs:80`, `src/store/project_order.rs:157`). | Guard present; rollback protects the prior list. |
++| Cross-team queue access | Order, entry, and task queries bind `auth.team_id`; migration composite FKs include `team_id` (`migrations/0022_project_task_order.sql:2`, `src/store/project_order.rs:109`). | Guard present. |
++| Old global/named claim bypass | Enrolled tasks are excluded from global claim and initial named claims (`src/store/tasks.rs:998`, `src/store/tasks.rs:1129`). | Guard present for non-expired initial claims. |
++| Unauthorized queue actor | Queue replacement and ordered claim require authenticated `coordinator` (`src/store/project_order.rs:25`, `src/store/project_order.rs:212`). | Guard present; existing integration test exercises a non-coordinator name. |
++| Same-project dependency omission | Unfinished same-project prerequisite outside the list is rejected (`src/store/project_order.rs:145`). | Guard present. |
++| Cancelled/superseded head | Head lookup skips all three terminal task states (`src/store/project_order.rs:235`). | Guard present; independent test covers superseded head. |
++| Independent project progress | Lock key includes `(team_id, project_key)` and ordered claim uses that key (`migrations/0022_project_task_order.sql:6`, `src/store/project_order.rs:220`). | Guard present, subject to coordinator E2E execution. |
++| Absent/empty queue | Ordered claim has no legacy fallback (`src/store/project_order.rs:225`, `src/store/project_order.rs:240`). | Guard present. |
++| Claimed head barrier | Claim update operates only on the first unfinished entry and returns no later work on failure (`src/store/project_order.rs:245`, `src/store/project_order.rs:263`). | Guard present. |
++
++## Added isolated tests
++
++`tests/project_task_order_adversarial.rs` adds two integration scenarios:
++
++1. `superseded_prerequisite_is_terminal_for_ordered_claims` — expected to **fail on
++   the current candidate**, demonstrating the concrete defect above.
++2. `superseded_head_does_not_hold_back_later_ordered_work` — expected to pass,
++   confirming that head selection itself correctly skips a superseded entry.
++
++## Validation receipt
++
++- Requested command: `cargo test --locked --offline --test project_task_order_adversarial`
++- Agent execution: **NOT RUN**. The scoped GO runner permits only exact Node/Vitest/tsx
++  files and cannot invoke the Rust/PostgreSQL integration engine. Per task authority,
++  no shell, Docker, or production database was used.
++- Coordinator action: run the requested command against an isolated ephemeral
++  PostgreSQL database. The first test should fail before repair and pass after all
++  prerequisite claim predicates include `superseded`.
++
++## Acceptance recommendation
++
++**REPAIR_REQUIRED.** The candidate has a concrete semantic contradiction in an
++explicitly supported terminal state. Re-run the focused adversarial test and the
++existing `project_task_order` suite after repairing the shared terminal-state rule;
++independent acceptance remains coordinator-owned.
+diff --git a/src/store/mod.rs b/src/store/mod.rs
+index b5a38e7..34bfd8c 100644
+--- a/src/store/mod.rs
++++ b/src/store/mod.rs
+@@ -15,6 +15,7 @@ pub mod routing;
+ pub mod sessions;
+ pub mod task_cursor;
+ pub mod tasks;
++pub mod project_order;
+ 
+ pub mod attachments;
+ 
+diff --git a/src/store/project_order.rs b/src/store/project_order.rs
+new file mode 100644
+index 0000000..7284e6f
+--- /dev/null
++++ b/src/store/project_order.rs
+@@ -0,0 +1,342 @@
++use std::collections::{HashMap, HashSet};
++
++use sqlx::{PgPool, Row};
++use uuid::Uuid;
++
++use super::tasks;
++use crate::{
++    auth::AuthCtx,
++    error::{BusError, BusResult},
++    model::ClaimResult,
++};
++
++const MAX_ITEMS: usize = 10_000;
++
++fn validate_project(project: &str) -> BusResult<()> {
++    let bytes = project.as_bytes();
++    if !(2..=80).contains(&bytes.len())
++        || !bytes[0].is_ascii_lowercase()
++        || !bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
++    {
++        return Err(BusError::invalid("project must be a canonical lowercase ID"));
++    }
++    Ok(())
++}
++
++fn require_coordinator(auth: &AuthCtx) -> BusResult<()> {
++    if auth.agent_name != "coordinator" {
++        return Err(BusError::forbidden("only the authenticated coordinator may approve or claim a project queue"));
++    }
++    Ok(())
++}
++
++fn validate_keys(project: &str, keys: &[String]) -> BusResult<()> {
++    if keys.len() > MAX_ITEMS {
++        return Err(BusError::invalid("ordered project queue has too many tasks"));
++    }
++    let prefix = format!("{project}:");
++    let mut seen = HashSet::new();
++    for key in keys {
++        if key.len() > 128 || !key.starts_with(&prefix) || key.len() <= prefix.len() || !seen.insert(key) {
++            return Err(BusError::invalid("queue keys must be unique existing tasks in the named project"));
++        }
++    }
++    Ok(())
++}
++
++/// Commit a full project order with optimistic revision fencing.
++/// Empty lists are valid and pause a project without touching its OPEN backlog.
++/// All mutations (and the history entry) are atomic in one PostgreSQL transaction.
++pub async fn replace_order(
++    pool: &PgPool,
++    auth: &AuthCtx,
++    project: &str,
++    expected_revision: i64,
++    keys: &[String],
++) -> BusResult<i64> {
++    validate_project(project)?;
++    require_coordinator(auth)?;
++    validate_keys(project, keys)?;
++    if expected_revision < 0 {
++        return Err(BusError::invalid("expected revision must be nonnegative"));
++    }
++
++    let mut tx = pool.begin().await?;
++    super::sessions::guard(&mut tx, auth).await?;
++    sqlx::query("INSERT INTO project_task_orders(team_id,project_key) VALUES($1,$2) ON CONFLICT DO NOTHING")
++        .bind(auth.team_id)
++        .bind(project)
++        .execute(&mut *tx)
++        .await?;
++
++    let current: i64 = sqlx::query_scalar(
++        "SELECT revision FROM project_task_orders WHERE team_id=$1 AND project_key=$2 FOR UPDATE",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .fetch_one(&mut *tx)
++    .await?;
++
++    if current != expected_revision {
++        return Err(BusError::conflict(format!(
++            "project queue revision changed; expected {expected_revision}, current {current}; refresh before replanning"
++        )));
++    }
++    if current == i64::MAX {
++        return Err(BusError::conflict("project queue revision is exhausted"));
++    }
++
++    // Existing running tasks may not be invalidated by a replan.
++    let active_old: i64 = sqlx::query_scalar(
++        "SELECT count(*) FROM project_task_order_entries e
++         JOIN tasks t ON t.id=e.task_id AND t.team_id=e.team_id
++         WHERE e.team_id=$1 AND e.project_key=$2
++           AND t.status='claimed' AND (t.lease_expires_at IS NULL OR t.lease_expires_at>now())",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .fetch_one(&mut *tx)
++    .await?;
++    if active_old > 0 {
++        return Err(BusError::conflict("project has live claims; complete or release them before changing order"));
++    }
++
++    let mut ids = HashMap::<String, Uuid>::new();
++    if !keys.is_empty() {
++        // Lock new task rows too, so an in-flight claim cannot slip through validation.
++        let rows: Vec<(Uuid, String, String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
++            "SELECT id,key,status,lease_expires_at FROM tasks
++             WHERE team_id=$1 AND key=ANY($2) FOR UPDATE",
++        )
++        .bind(auth.team_id)
++        .bind(keys)
++        .fetch_all(&mut *tx)
++        .await?;
++        if rows.len() != keys.len() {
++            return Err(BusError::invalid("all ordered tasks must already exist in this team"));
++        }
++        for (id, key, status, expires_at) in rows {
++            if matches!(status.as_str(), "cancelled" | "superseded") {
++                return Err(BusError::invalid(
++                    "proposed order contains a cancelled or superseded task; remove terminal work and submit an explicit replan",
++                ));
++            }
++            if status == "claimed" && expires_at.is_none_or(|expiry| expiry > chrono::Utc::now()) {
++                return Err(BusError::conflict("proposed order contains a task with an active claim"));
++            }
++            ids.insert(key, id);
++        }
++
++        let positions: HashMap<&str, usize> = keys.iter().enumerate().map(|(i, key)| (key.as_str(), i)).collect();
++        let dependencies: Vec<(String, String, String)> = sqlx::query_as(
++            "SELECT current_task.key, predecessor.key, predecessor.status
++             FROM task_deps dep
++             JOIN tasks current_task ON current_task.id=dep.task_id
++             JOIN tasks predecessor ON predecessor.id=dep.blocked_by_task_id
++             WHERE current_task.team_id=$1 AND predecessor.team_id=$1
++               AND current_task.key=ANY($2)",
++        )
++        .bind(auth.team_id)
++        .bind(keys)
++        .fetch_all(&mut *tx)
++        .await?;
++        let prefix = format!("{project}:");
++        for (current_key, predecessor_key, predecessor_status) in dependencies {
++            let Some(&current_pos) = positions.get(current_key.as_str()) else { continue; };
++            match positions.get(predecessor_key.as_str()) {
++                Some(&predecessor_pos) if predecessor_pos >= current_pos => {
++                    return Err(BusError::invalid(format!(
++                        "{current_key} depends on {predecessor_key}, which is not earlier in the approved queue"
++                    )));
++                }
++                None if predecessor_key.starts_with(&prefix)
++                    && predecessor_status != "done" => {
++                    return Err(BusError::invalid(format!(
++                        "{current_key} has unfinished same-project prerequisite {predecessor_key} outside the approved queue"
++                    )));
++                }
++                _ => {}
++            }
++        }
++    }
++
++    sqlx::query("DELETE FROM project_task_order_entries WHERE team_id=$1 AND project_key=$2")
++        .bind(auth.team_id)
++        .bind(project)
++        .execute(&mut *tx)
++        .await?;
++    for (i, key) in keys.iter().enumerate() {
++        sqlx::query(
++            "INSERT INTO project_task_order_entries(team_id,project_key,task_id,position)
++             VALUES($1,$2,$3,$4)",
++        )
++        .bind(auth.team_id)
++        .bind(project)
++        .bind(ids[key])
++        .bind(i as i32 + 1)
++        .execute(&mut *tx)
++        .await?;
++    }
++
++    let next_revision = current + 1;
++    sqlx::query(
++        "UPDATE project_task_orders SET revision=$3,updated_at=now()
++         WHERE team_id=$1 AND project_key=$2",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .bind(next_revision)
++    .execute(&mut *tx)
++    .await?;
++    sqlx::query(
++        "INSERT INTO project_task_order_revisions
++         (team_id,project_key,revision,task_keys,approved_by,approved_agent,approved_session)
++         VALUES($1,$2,$3,$4,$5,$6,$7)",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .bind(next_revision)
++    .bind(keys)
++    .bind(auth.agent_id)
++    .bind(&auth.agent_name)
++    .bind(&auth.session)
++    .execute(&mut *tx)
++    .await?;
++    tx.commit().await?;
++    Ok(next_revision)
++}
++
++/// Fail-closed strict queue head. No fallback to the global FIFO and no
++/// skipping blocked/claimed tasks to consume unrelated backlog.
++pub async fn claim_next_ordered(
++    pool: &PgPool,
++    auth: &AuthCtx,
++    project: &str,
++    lease_seconds: Option<i64>,
++) -> BusResult<ClaimResult> {
++    validate_project(project)?;
++    require_coordinator(auth)?;
++    let lease = lease_seconds.unwrap_or(900).clamp(30, 86_400);
++    let mut tx = pool.begin().await?;
++    super::sessions::guard(&mut tx, auth).await?;
++
++    // A row lock serializes both project claims and ordered-plan revisions.
++    let revision: Option<i64> = sqlx::query_scalar(
++        "SELECT revision FROM project_task_orders
++         WHERE team_id=$1 AND project_key=$2 FOR UPDATE SKIP LOCKED",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .fetch_optional(&mut *tx)
++    .await?;
++    let Some(revision) = revision else {
++        return Ok(ClaimResult { claimed: false, task: None,
++            reason: Some("project queue is absent or currently locked".into()) });
++    };
++
++    let head: Option<(Uuid, String)> = sqlx::query_as(
++        "SELECT t.id,t.key FROM project_task_order_entries e
++         JOIN tasks t ON t.id=e.task_id AND t.team_id=e.team_id
++         WHERE e.team_id=$1 AND e.project_key=$2
++           AND t.status <> 'done'
++         ORDER BY e.position LIMIT 1",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .fetch_optional(&mut *tx)
++    .await?;
++    let Some((id, key)) = head else {
++        return Ok(ClaimResult { claimed: false, task: None,
++            reason: Some("approved project queue has no unfinished tasks".into()) });
++    };
++
++    let updated: Option<Uuid> = sqlx::query_scalar(
++        "UPDATE tasks SET status='claimed',claimed_by=$2,claimed_session=$4,claimed_at=now(),
++         lease_expires_at=now()+make_interval(secs=>$3),updated_at=now()
++         WHERE id=$1 AND team_id=$5
++           AND (status='open' OR (status='claimed' AND lease_expires_at<now()))
++           AND NOT EXISTS (
++             SELECT 1 FROM task_deps dep
++             JOIN tasks prerequisite ON prerequisite.id=dep.blocked_by_task_id
++             WHERE dep.task_id=$1 AND prerequisite.status <> 'done'
++           )
++         RETURNING id",
++    )
++    .bind(id)
++    .bind(auth.agent_id)
++    .bind(lease as f64)
++    .bind(&auth.session)
++    .bind(auth.team_id)
++    .fetch_optional(&mut *tx)
++    .await?;
++    if updated.is_none() {
++        return Ok(ClaimResult { claimed: false, task: None,
++            reason: Some("first unfinished ordered task is claimed or blocked; no bypass".into()) });
++    }
++    sqlx::query(
++        "INSERT INTO task_events(task_id,agent_id,event,detail) VALUES($1,$2,'claimed',$3)",
++    )
++    .bind(id)
++    .bind(auth.agent_id)
++    .bind(format!("project:{project} order-revision:{revision}"))
++    .execute(&mut *tx)
++    .await?;
++    tx.commit().await?;
++    let detail = tasks::get_task(pool, auth, &key).await?;
++    Ok(ClaimResult { claimed: true, task: Some(detail.task), reason: None })
++}
++
++/// Return one consistent snapshot; a concurrent reorder cannot pair an old
++/// revision with a new list.
++pub async fn get_order(
++    pool: &PgPool,
++    auth: &AuthCtx,
++    project: &str,
++) -> BusResult<(i64, Vec<String>)> {
++    validate_project(project)?;
++    let mut tx = pool.begin().await?;
++    super::sessions::guard(&mut tx, auth).await?;
++    let current: Option<i64> = sqlx::query_scalar(
++        "SELECT revision FROM project_task_orders
++         WHERE team_id=$1 AND project_key=$2 FOR SHARE",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .fetch_optional(&mut *tx)
++    .await?;
++    let Some(revision) = current else { return Ok((0, Vec::new())); };
++    let keys: Vec<String> = sqlx::query(
++        "SELECT t.key FROM project_task_order_entries e
++         JOIN tasks t ON t.id=e.task_id AND t.team_id=e.team_id
++         WHERE e.team_id=$1 AND e.project_key=$2 ORDER BY e.position",
++    )
++    .bind(auth.team_id)
++    .bind(project)
++    .fetch_all(&mut *tx)
++    .await?
++    .into_iter()
++    .map(|row| row.get::<String, _>("key"))
++    .collect();
++    tx.commit().await?;
++    Ok((revision, keys))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn project_id_rejects_ambiguous_and_unsafe_names() {
++        for project in ["", "A", "Gocore", "-gocore", "gocore/other", "go_core", "g", "🔥"] {
++            assert!(validate_project(project).is_err(), "{project}");
++        }
++        for project in ["gocore", "ai-crew-sync", "swe-af", "ultra"] {
++            assert!(validate_project(project).is_ok(), "{project}");
++        }
++    }
++    #[test]
++    fn queue_rejects_mixed_or_duplicate_task_keys() {
++        assert!(validate_keys("gocore", &["gocore:A".into(), "gocore:A".into()]).is_err());
++        assert!(validate_keys("gocore", &["ultra:A".into()]).is_err());
++        assert!(validate_keys("gocore", &[]).is_ok());
++    }
++}
+diff --git a/src/store/tasks.rs b/src/store/tasks.rs
+index e0de213..c08920d 100644
+--- a/src/store/tasks.rs
++++ b/src/store/tasks.rs
+@@ -943,10 +943,10 @@ pub async fn list_tasks(
+         .map(|s| s.trim().to_lowercase())
+         .filter(|s| s != "any");
+     if let Some(s) = &status
+-        && !["open", "claimed", "done", "cancelled"].contains(&s.as_str())
++        && !["open", "claimed", "done", "cancelled", "superseded"].contains(&s.as_str())
+     {
+         return Err(BusError::invalid(
+-            "status must be one of: open, claimed, done, cancelled, any",
++            "status must be one of: open, claimed, done, cancelled, superseded, any",
+         ));
+     }
+ 
+@@ -1035,6 +1035,15 @@ pub async fn claim_task(
+           AND (status = 'open'
+                OR (claimed_by = $1 AND COALESCE(claimed_session, '') = $5)
+                OR (lease_expires_at IS NOT NULL AND lease_expires_at < now()))
++          -- An explicitly approved project queue owns initial admission.
++          -- The original session may still re-claim to renew its held lease.
++          AND (
++              NOT EXISTS (SELECT 1 FROM project_task_order_entries e
++                          WHERE e.team_id=tasks.team_id AND e.task_id=tasks.id)
++              OR (status = 'claimed' AND claimed_by = $1
++                  AND COALESCE(claimed_session, '') = $5
++                  AND lease_expires_at > now())
++          )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
+@@ -1175,6 +1184,9 @@ pub async fn claim_next_task(
+             WHERE team_id = $1
+               AND (status = 'open'
+                    OR (status = 'claimed' AND lease_expires_at < now()))
++              -- Do not steal an approved project queue task via global FIFO.
++              AND NOT EXISTS (SELECT 1 FROM project_task_order_entries e
++                              WHERE e.team_id=tasks.team_id AND e.task_id=tasks.id)
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM task_deps td JOIN tasks d ON d.id = td.blocked_by_task_id
+diff --git a/src/tools/tasks.rs b/src/tools/tasks.rs
+index 07aa3e4..2e6821b 100644
+--- a/src/tools/tasks.rs
++++ b/src/tools/tasks.rs
+@@ -3,7 +3,7 @@ use rmcp::{
+     tool_router,
+ };
+ use schemars::JsonSchema;
+-use serde::Deserialize;
++use serde::{Deserialize, Serialize};
+ 
+ use super::{Bus, auth_of};
+ use crate::{
+@@ -88,7 +88,7 @@ pub struct CreateTaskArgs {
+     #[schemars(schema_with = "crate::model::any_json_schema")]
+     pub metadata: Option<serde_json::Value>,
+     /// Keys of existing tasks this one depends on. It cannot be claimed until
+-    /// every dependency is done or cancelled, and claim_next_task skips it.
++    /// every dependency is done; cancelled or superseded dependencies require explicit replan.
+     #[serde(default)]
+     pub depends_on: Vec<String>,
+ }
+@@ -177,8 +177,69 @@ pub struct SupersedeTaskArgs {
+     pub reason: String,
+ }
+ 
++#[derive(Debug, Deserialize, JsonSchema)]
++pub struct ReplaceProjectOrderArgs {
++    /// Canonical project ID. Only tasks from this project may enter its explicit queue.
++    pub project: String,
++    /// Last read queue revision; stale changes are rejected.
++    pub expected_revision: i64,
++    /// Existing CrewSync task keys in the exact approved execution order.
++    pub task_keys: Vec<String>,
++}
++
++#[derive(Debug, Deserialize, JsonSchema)]
++pub struct ProjectOrderArgs {
++    pub project: String,
++}
++
++#[derive(Debug, Deserialize, JsonSchema)]
++pub struct ClaimProjectOrderedArgs {
++    pub project: String,
++    #[serde(default)]
++    pub lease_seconds: Option<i64>,
++}
++
++#[derive(Debug, Serialize, JsonSchema)]
++pub struct ProjectOrderView {
++    pub project: String,
++    pub revision: i64,
++    pub task_keys: Vec<String>,
++}
++
+ #[tool_router(router = tasks_router, vis = "pub")]
+-impl Bus {
++impl Bus {    #[tool(description = "Read the explicitly approved ordered queue for one project, including its revision. An absent queue has revision 0 and no tasks.")]
++    async fn get_project_task_order(
++        &self,
++        ctx: RequestContext<rmcp::RoleServer>,
++        Parameters(args): Parameters<ProjectOrderArgs>,
++    ) -> Result<Json<ProjectOrderView>, ErrorData> {
++        let auth = auth_of(&ctx)?;
++        let (revision,task_keys) = crate::store::project_order::get_order(&self.db,&auth,&args.project).await?;
++        Ok(Json(ProjectOrderView {project: args.project,revision,task_keys}))
++    }
++
++    #[tool(description = "Atomically replace an approved per-project task order using exact existing task IDs and optimistic revision fencing. Rejects active claims, foreign projects and stale revisions.")]
++    async fn replace_project_task_order(
++        &self,
++        ctx: RequestContext<rmcp::RoleServer>,
++        Parameters(args): Parameters<ReplaceProjectOrderArgs>,
++    ) -> Result<Json<ProjectOrderView>, ErrorData> {
++        let auth = auth_of(&ctx)?;
++        let revision = crate::store::project_order::replace_order(&self.db,&auth,&args.project,args.expected_revision,&args.task_keys).await?;
++        Ok(Json(ProjectOrderView {project: args.project,revision,task_keys:args.task_keys}))
++    }
++
++    #[tool(description = "Atomically claim the first unfinished task in an explicitly approved project queue. Does not skip a blocked or claimed preceding task. Never consumes unrelated or unscheduled backlog.")]
++    async fn claim_next_project_ordered_task(
++        &self,
++        ctx: RequestContext<rmcp::RoleServer>,
++        Parameters(args): Parameters<ClaimProjectOrderedArgs>,
++    ) -> Result<Json<ClaimResult>, ErrorData> {
++        let auth = auth_of(&ctx)?;
++        Ok(Json(crate::store::project_order::claim_next_ordered(&self.db,&auth,&args.project,args.lease_seconds).await?))
++    }
++
++
+     #[tool(
+         description = "Register a unit of shared work so the team can coordinate on it. \
+                        Creating a task does not claim it. Use depends_on to chain work \
+diff --git a/tests/project_task_order.rs b/tests/project_task_order.rs
+new file mode 100644
+index 0000000..30cb05c
+--- /dev/null
++++ b/tests/project_task_order.rs
+@@ -0,0 +1,268 @@
++#[path = "task_pagination_fixture.rs"]
++mod fixture;
++
++use ai_crew_sync::{
++    auth::AuthCtx,
++    store::{
++        project_order::{claim_next_ordered, get_order, replace_order},
++        tasks::{self, CreateInput},
++    },
++};
++use fixture::{Fixture, cleanup, setup_fixture};
++use sqlx::PgPool;
++use uuid::Uuid;
++
++async fn auth(fixture: &Fixture, session: &str) -> Result<AuthCtx, sqlx::Error> {
++    let agent_id: Uuid = sqlx::query_scalar(
++        "INSERT INTO agents(team_id,name) VALUES($1,$2) RETURNING id",
++    )
++    .bind(fixture.team_id)
++    .bind("coordinator")
++    .fetch_one(&fixture.pool)
++    .await?;
++    Ok(AuthCtx {
++        agent_id,
++        agent_name: "coordinator".to_owned(),
++        team_id: fixture.team_id,
++        team_slug: format!("order-{}", fixture.team_id),
++        session: session.to_owned(),
++        session_id: None,
++        session_epoch: None,
++        token_id: None,
++    })
++}
++
++async fn create(pool: &PgPool, auth: &AuthCtx, key: &str, deps: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
++    tasks::create_task(pool, auth, CreateInput {
++        key: key.to_owned(),
++        title: format!("test task {key}"),
++        description: None,
++        metadata: None,
++        depends_on: deps.iter().map(|value| (*value).to_owned()).collect(),
++    })
++    .await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn picks_approved_order_not_creation_order_and_preserves_other_project() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-owner-a").await?;
++    let a = format!("{}:a", f.task_prefix);
++    let b = format!("{}:b", f.task_prefix);
++    let c = format!("{}:c", f.task_prefix);
++    let other_project = format!("other-{}", Uuid::new_v4().simple());
++    let q = format!("{other_project}:q");
++    for key in [&a, &b, &c, &q] { create(&f.pool, &owner, key, &[]).await?; }
++
++    let (rev, initial) = get_order(&f.pool, &owner, &f.task_prefix).await?;
++    assert_eq!(rev, 0);
++    assert!(initial.is_empty());
++    assert!(!claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?.claimed);
++
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[c.clone(), a.clone(), b.clone()]).await?, 1);
++    assert_eq!(replace_order(&f.pool, &owner, &other_project, 0, std::slice::from_ref(&q)).await?, 1);
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (1, vec![c.clone(), a.clone(), b.clone()]));
++
++    let first = claim_next_ordered(&f.pool, &owner, &f.task_prefix, Some(60)).await?;
++    assert_eq!(first.task.as_ref().map(|t| t.key.as_str()), Some(c.as_str()));
++    assert!(!claim_next_ordered(&f.pool, &owner, &f.task_prefix, Some(60)).await?.claimed);
++
++    // Q may proceed while the exact P head is still running.
++    let q_claim = claim_next_ordered(&f.pool, &owner, &other_project, Some(60)).await?;
++    assert_eq!(q_claim.task.as_ref().map(|t| t.key.as_str()), Some(q.as_str()));
++
++    tasks::complete_task(&f.pool, &owner, &c, Some("accepted C".to_owned())).await?;
++    let second = claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?;
++    assert_eq!(second.task.as_ref().map(|t| t.key.as_str()), Some(a.as_str()));
++    tasks::complete_task(&f.pool, &owner, &a, Some("accepted A".to_owned())).await?;
++    let third = claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?;
++    assert_eq!(third.task.as_ref().map(|t| t.key.as_str()), Some(b.as_str()));
++    assert!(tasks::get_task(&f.pool, &owner, &b).await?.history.iter().any(|e| e.event == "claimed" && e.detail.as_deref().is_some_and(|v| v.contains("order-revision:1"))));
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn stale_revisions_and_live_claims_fail_without_partial_replan() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-replanner-a").await?;
++    let a = format!("{}:a", f.task_prefix);
++    let b = format!("{}:b", f.task_prefix);
++    create(&f.pool, &owner, &a, &[]).await?;
++    create(&f.pool, &owner, &b, &[]).await?;
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[a.clone(), b.clone()]).await?, 1);
++    assert!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[b.clone(), a.clone()]).await.is_err());
++    claim_next_ordered(&f.pool, &owner, &f.task_prefix, Some(120)).await?;
++    assert!(replace_order(&f.pool, &owner, &f.task_prefix, 1, &[b.clone(), a.clone()]).await.is_err());
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (1, vec![a.clone(), b.clone()]));
++    tasks::complete_task(&f.pool, &owner, &a, Some("accepted A".to_owned())).await?;
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 1, &[b.clone(), a.clone()]).await?, 2);
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (2, vec![b, a]));
++    let revisions: (i64,) = sqlx::query_as(
++        "SELECT count(*) FROM project_task_order_revisions WHERE team_id=$1 AND project_key=$2",
++    )
++    .bind(f.team_id)
++    .bind(&f.task_prefix)
++    .fetch_one(&f.pool)
++    .await?;
++    assert_eq!(revisions.0, 2);
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn dependency_inversion_duplicate_key_and_foreign_task_do_not_change_order() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-dependencies-a").await?;
++    let a = format!("{}:a", f.task_prefix);
++    let b = format!("{}:b", f.task_prefix);
++    create(&f.pool, &owner, &a, &[]).await?;
++    create(&f.pool, &owner, &b, &[&a]).await?;
++    assert!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[b.clone(), a.clone()]).await.is_err());
++    assert!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[a.clone(), a.clone()]).await.is_err());
++    assert!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[a.clone(), "foreign:x".to_owned()]).await.is_err());
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (0, Vec::new()));
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[a.clone(), b.clone()]).await?, 1);
++    let picked = claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?;
++    assert_eq!(picked.task.as_ref().map(|t| t.key.as_str()), Some(a.as_str()));
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn empty_plan_pauses_open_backlog_and_new_claimed_task_cannot_be_planned() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-empty-a").await?;
++    let a = format!("{}:a", f.task_prefix);
++    let b = format!("{}:b", f.task_prefix);
++    create(&f.pool, &owner, &a, &[]).await?;
++    create(&f.pool, &owner, &b, &[]).await?;
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, &[]).await?, 1);
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (1, vec![]));
++    assert!(!claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?.claimed);
++    tasks::claim_task(&f.pool, &owner, &a, Some(120)).await?;
++    assert!(replace_order(&f.pool, &owner, &f.task_prefix, 1, &[a.clone()]).await.is_err());
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (1, vec![]));
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 1, &[b.clone()]).await?, 2);
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn team_boundary_and_coordinator_authority_are_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-team-a").await?;
++    let a = format!("{}:a", f.task_prefix);
++    create(&f.pool, &owner, &a, &[]).await?;
++    let foreign = setup_fixture().await?;
++    let foreign_owner = auth(&foreign, "order-team-b").await?;
++    assert!(replace_order(&foreign.pool, &foreign_owner, &f.task_prefix, 0, std::slice::from_ref(&a)).await.is_err());
++    assert_eq!(get_order(&foreign.pool, &foreign_owner, &f.task_prefix).await?, (0, vec![]));
++    let mut worker = owner.clone();
++    worker.agent_name = "worker".to_owned();
++    assert!(replace_order(&f.pool, &worker, &f.task_prefix, 0, std::slice::from_ref(&a)).await.is_err());
++    assert!(claim_next_ordered(&f.pool, &worker, &f.task_prefix, None).await.is_err());
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, std::slice::from_ref(&a)).await?, 1);
++    cleanup(foreign).await?;
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn concurrent_same_project_claims_never_double_allocate() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-race-a").await?;
++    let a = format!("{}:a", f.task_prefix);
++    let b = format!("{}:b", f.task_prefix);
++    create(&f.pool, &owner, &a, &[]).await?;
++    create(&f.pool, &owner, &b, &[]).await?;
++    replace_order(&f.pool, &owner, &f.task_prefix, 0, &[a.clone(), b]).await?;
++    let mut other_session = owner.clone();
++    other_session.session = "order-race-b".to_owned();
++    let (one, two) = tokio::join!(
++        claim_next_ordered(&f.pool, &owner, &f.task_prefix, Some(120)),
++        claim_next_ordered(&f.pool, &other_session, &f.task_prefix, Some(120))
++    );
++    let claimed = [one?, two?].into_iter().filter(|x| x.claimed).collect::<Vec<_>>();
++    assert_eq!(claimed.len(), 1);
++    assert_eq!(claimed[0].task.as_ref().map(|x| x.key.as_str()), Some(a.as_str()));
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn legacy_claim_entrypoints_cannot_bypass_approved_project_order() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-legacy-a").await?;
++    let first = format!("{}:first", f.task_prefix);
++    let second = format!("{}:second", f.task_prefix);
++    let unplanned = format!("{}:unplanned", f.task_prefix);
++    create(&f.pool, &owner, &first, &[]).await?;
++    create(&f.pool, &owner, &second, &[]).await?;
++    create(&f.pool, &owner, &unplanned, &[]).await?;
++    replace_order(&f.pool, &owner, &f.task_prefix, 0, &[second.clone(), first.clone()]).await?;
++
++    // Old named claims may not initially claim *any* enrolled task.
++    assert!(!tasks::claim_task(&f.pool, &owner, &first, Some(60)).await?.claimed);
++    assert!(!tasks::claim_task(&f.pool, &owner, &second, Some(60)).await?.claimed);
++
++    // Old unnamed claim skips approved tasks, serving only the unplanned pool.
++    let global = tasks::claim_next_task(&f.pool, &owner, Some(60)).await?;
++    assert_eq!(global.task.as_ref().map(|t| t.key.as_str()), Some(unplanned.as_str()));
++    assert!(claim_next_ordered(&f.pool, &owner, &f.task_prefix, Some(60)).await?.claimed);
++    // Existing approved holder may renew its lease through the backwards-compatible named path.
++    assert!(tasks::claim_task(&f.pool, &owner, &second, Some(60)).await?.claimed);
++    assert!(!tasks::claim_task(&f.pool, &owner, &first, Some(60)).await?.claimed);
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn unfinished_same_project_dependency_cannot_be_left_out_of_order() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-dangling-dependency").await?;
++    let predecessor = format!("{}:prerequisite", f.task_prefix);
++    let dependent = format!("{}:dependent", f.task_prefix);
++    create(&f.pool, &owner, &predecessor, &[]).await?;
++    create(&f.pool, &owner, &dependent, &[&predecessor]).await?;
++
++    // An explicitly ordered queue must not deadlock itself by omitting
++    // a same-project prerequisite that the daemon can no longer discover.
++    let err = replace_order(&f.pool, &owner, &f.task_prefix, 0, std::slice::from_ref(&dependent)).await;
++    assert!(err.is_err());
++    assert_eq!(get_order(&f.pool, &owner, &f.task_prefix).await?, (0, vec![]));
++
++    // A prerequisite already terminal via the ordinary CrewSync workflow
++    // may be omitted without blocking the new approved plan.
++    assert!(tasks::claim_task(&f.pool, &owner, &predecessor, Some(120)).await?.claimed);
++    tasks::complete_task(&f.pool, &owner, &predecessor, Some("accepted predecessor".to_owned())).await?;
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, std::slice::from_ref(&dependent)).await?, 1);
++    let granted = claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?;
++    assert_eq!(granted.task.as_ref().map(|t| t.key.as_str()), Some(dependent.as_str()));
++    cleanup(f).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn blocked_head_stays_barrier_until_prerequisite_recovers() -> Result<(), Box<dyn std::error::Error>> {
++    let f = setup_fixture().await?;
++    let owner = auth(&f, "order-blocked-head").await?;
++    let prerequisite_project = format!("recovery-{}", Uuid::new_v4().simple());
++    let prerequisite = format!("{prerequisite_project}:prerequisite");
++    let dependent = format!("{}:dependent", f.task_prefix);
++    create(&f.pool, &owner, &prerequisite, &[]).await?;
++    create(&f.pool, &owner, &dependent, &[&prerequisite]).await?;
++
++    assert_eq!(replace_order(&f.pool, &owner, &f.task_prefix, 0, std::slice::from_ref(&dependent)).await?, 1);
++    let blocked = claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?;
++    assert!(!blocked.claimed);
++    assert!(blocked.reason.as_deref().is_some_and(|reason| reason.contains("blocked")));
++
++    assert!(tasks::claim_task(&f.pool, &owner, &prerequisite, Some(120)).await?.claimed);
++    tasks::complete_task(&f.pool, &owner, &prerequisite, Some("recovered prerequisite".to_owned())).await?;
++    let recovered = claim_next_ordered(&f.pool, &owner, &f.task_prefix, None).await?;
++    assert_eq!(recovered.task.as_ref().map(|task| task.key.as_str()), Some(dependent.as_str()));
++    cleanup(f).await?;
++    Ok(())
++}
+diff --git a/tests/project_task_order_adversarial.rs b/tests/project_task_order_adversarial.rs
+new file mode 100644
+index 0000000..24122c8
+--- /dev/null
++++ b/tests/project_task_order_adversarial.rs
+@@ -0,0 +1,338 @@
++#[path = "task_pagination_fixture.rs"]
++mod fixture;
++
++use ai_crew_sync::{
++    auth::AuthCtx,
++    store::{
++        project_order::{claim_next_ordered, get_order, replace_order},
++        tasks::{self, CreateInput},
++    },
++};
++use fixture::{cleanup, setup_fixture, Fixture};
++use sqlx::PgPool;
++use uuid::Uuid;
++
++async fn coordinator_auth(fixture: &Fixture, session: &str) -> Result<AuthCtx, sqlx::Error> {
++    let agent_id: Uuid = sqlx::query_scalar(
++        "INSERT INTO agents(team_id,name) VALUES($1,$2) RETURNING id",
++    )
++    .bind(fixture.team_id)
++    .bind("coordinator")
++    .fetch_one(&fixture.pool)
++    .await?;
++    Ok(AuthCtx {
++        agent_id,
++        agent_name: "coordinator".to_owned(),
++        team_id: fixture.team_id,
++        team_slug: format!("order-{}", fixture.team_id),
++        session: session.to_owned(),
++        session_id: None,
++        session_epoch: None,
++        token_id: None,
++    })
++}
++
++async fn create(
++    pool: &PgPool,
++    auth: &AuthCtx,
++    key: &str,
++    dependencies: &[&str],
++) -> Result<(), Box<dyn std::error::Error>> {
++    tasks::create_task(
++        pool,
++        auth,
++        CreateInput {
++            key: key.to_owned(),
++            title: format!("adversarial task {key}"),
++            description: None,
++            metadata: None,
++            depends_on: dependencies.iter().map(|key| (*key).to_owned()).collect(),
++        },
++    )
++    .await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn superseded_prerequisite_requires_explicit_replan(
++) -> Result<(), Box<dyn std::error::Error>> {
++    let fixture = setup_fixture().await?;
++    let owner = coordinator_auth(&fixture, "adversarial-superseded-dependency").await?;
++    let prerequisite = format!("{}:prerequisite", fixture.task_prefix);
++    let dependent = format!("{}:dependent", fixture.task_prefix);
++    create(&fixture.pool, &owner, &prerequisite, &[]).await?;
++    create(&fixture.pool, &owner, &dependent, &[&prerequisite]).await?;
++
++    sqlx::query("UPDATE tasks SET status='superseded' WHERE team_id=$1 AND key=$2")
++        .bind(fixture.team_id)
++        .bind(&prerequisite)
++        .execute(&fixture.pool)
++        .await?;
++
++    let superseded = tasks::list_tasks(
++        &fixture.pool,
++        &owner,
++        Some("superseded".to_owned()),
++        false,
++        10,
++    )
++    .await?;
++    assert_eq!(
++        superseded.tasks.iter().map(|task| task.key.as_str()).collect::<Vec<_>>(),
++        vec![prerequisite.as_str()],
++        "legacy task listing must retain the lifecycle superseded status",
++    );
++
++    assert!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            0,
++            std::slice::from_ref(&dependent),
++        )
++        .await
++        .is_err(),
++        "a superseded prerequisite still requires an explicit replan",
++    );
++
++    assert!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            0,
++            &[prerequisite.clone(), dependent.clone()],
++        )
++        .await
++        .is_err(),
++        "a superseded task cannot be newly admitted to an approved order",
++    );
++    assert_eq!(get_order(&fixture.pool, &owner, &fixture.task_prefix).await?, (0, vec![]));
++
++    cleanup(fixture).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn cancelled_prerequisite_does_not_unlock_successor_without_replan(
++) -> Result<(), Box<dyn std::error::Error>> {
++    let fixture = setup_fixture().await?;
++    let owner = coordinator_auth(&fixture, "adversarial-cancelled-dependency").await?;
++    let prerequisite = format!("{}:prerequisite", fixture.task_prefix);
++    let dependent = format!("{}:dependent", fixture.task_prefix);
++    create(&fixture.pool, &owner, &prerequisite, &[]).await?;
++    create(&fixture.pool, &owner, &dependent, &[&prerequisite]).await?;
++
++    sqlx::query("UPDATE tasks SET status='cancelled' WHERE team_id=$1 AND key=$2")
++        .bind(fixture.team_id)
++        .bind(&prerequisite)
++        .execute(&fixture.pool)
++        .await?;
++
++    assert!(replace_order(
++        &fixture.pool,
++        &owner,
++        &fixture.task_prefix,
++        0,
++        std::slice::from_ref(&dependent),
++    )
++    .await
++    .is_err(), "cancelled prerequisites require explicit replan");
++
++    assert!(replace_order(
++        &fixture.pool,
++        &owner,
++        &fixture.task_prefix,
++        0,
++        &[prerequisite.clone(), dependent.clone()],
++    )
++    .await
++    .is_err(), "a cancelled task cannot be newly admitted to an approved order");
++    assert_eq!(get_order(&fixture.pool, &owner, &fixture.task_prefix).await?, (0, vec![]));
++
++    cleanup(fixture).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn terminal_order_rejection_preserves_order_revision_and_stale_fence(
++) -> Result<(), Box<dyn std::error::Error>> {
++    let fixture = setup_fixture().await?;
++    let owner = coordinator_auth(&fixture, "adversarial-terminal-revision").await?;
++    let first = format!("{}:first", fixture.task_prefix);
++    let cancelled = format!("{}:cancelled", fixture.task_prefix);
++    let superseded = format!("{}:superseded", fixture.task_prefix);
++    for key in [&first, &cancelled, &superseded] {
++        create(&fixture.pool, &owner, key, &[]).await?;
++    }
++    assert_eq!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            0,
++            std::slice::from_ref(&first),
++        )
++        .await?,
++        1
++    );
++    for (key, status) in [
++        (cancelled.as_str(), "cancelled"),
++        (superseded.as_str(), "superseded"),
++    ] {
++        sqlx::query("UPDATE tasks SET status=$3 WHERE team_id=$1 AND key=$2")
++            .bind(fixture.team_id)
++            .bind(key)
++            .bind(status)
++            .execute(&fixture.pool)
++            .await?;
++        let proposed = vec![first.clone(), key.to_owned()];
++        assert!(
++            replace_order(
++                &fixture.pool,
++                &owner,
++                &fixture.task_prefix,
++                1,
++                &proposed,
++            )
++            .await
++            .is_err(),
++            "{status} tasks must not enter a new approved order",
++        );
++        assert_eq!(
++            get_order(&fixture.pool, &owner, &fixture.task_prefix).await?,
++            (1, vec![first.clone()]),
++        );
++    }
++
++    assert!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            0,
++            std::slice::from_ref(&first),
++        )
++        .await
++        .is_err(),
++        "a stale revision remains rejected after terminal-order failures",
++    );
++    assert_eq!(
++        get_order(&fixture.pool, &owner, &fixture.task_prefix).await?,
++        (1, vec![first]),
++    );
++
++    cleanup(fixture).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn superseded_head_requires_explicit_replan_before_later_work(
++) -> Result<(), Box<dyn std::error::Error>> {
++    let fixture = setup_fixture().await?;
++    let owner = coordinator_auth(&fixture, "adversarial-superseded-head").await?;
++    let first = format!("{}:first", fixture.task_prefix);
++    let second = format!("{}:second", fixture.task_prefix);
++    create(&fixture.pool, &owner, &first, &[]).await?;
++    create(&fixture.pool, &owner, &second, &[]).await?;
++
++    assert_eq!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            0,
++            &[first.clone(), second.clone()],
++        )
++        .await?,
++        1
++    );
++    sqlx::query("UPDATE tasks SET status='superseded' WHERE team_id=$1 AND key=$2")
++        .bind(fixture.team_id)
++        .bind(&first)
++        .execute(&fixture.pool)
++        .await?;
++
++    let blocked = claim_next_ordered(&fixture.pool, &owner, &fixture.task_prefix, None).await?;
++    assert!(!blocked.claimed, "superseded queue heads require an explicit replan");
++
++    assert_eq!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            1,
++            std::slice::from_ref(&second),
++        )
++        .await?,
++        2
++    );
++    let claim = claim_next_ordered(&fixture.pool, &owner, &fixture.task_prefix, None).await?;
++    assert!(claim.claimed);
++    assert_eq!(claim.task.as_ref().map(|task| task.key.as_str()), Some(second.as_str()));
++
++    cleanup(fixture).await?;
++    Ok(())
++}
++
++#[tokio::test]
++async fn cancelled_head_requires_explicit_replan_before_later_work(
++) -> Result<(), Box<dyn std::error::Error>> {
++    let fixture = setup_fixture().await?;
++    let owner = coordinator_auth(&fixture, "adversarial-cancelled-head").await?;
++    let first = format!("{}:first", fixture.task_prefix);
++    let second = format!("{}:second", fixture.task_prefix);
++    create(&fixture.pool, &owner, &first, &[]).await?;
++    create(&fixture.pool, &owner, &second, &[]).await?;
++
++    assert_eq!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            0,
++            &[first.clone(), second.clone()],
++        )
++        .await?,
++        1
++    );
++    let cancelled = tasks::cancel_task(
++        &fixture.pool,
++        &owner,
++        &first,
++        "approved work withdrawn; coordinator must replan",
++    )
++    .await?;
++    assert_eq!(cancelled.status, "cancelled");
++
++    let blocked = claim_next_ordered(&fixture.pool, &owner, &fixture.task_prefix, None).await?;
++    assert!(
++        !blocked.claimed,
++        "cancelled queue heads must not silently unlock later work",
++    );
++
++    assert_eq!(
++        replace_order(
++            &fixture.pool,
++            &owner,
++            &fixture.task_prefix,
++            1,
++            std::slice::from_ref(&second),
++        )
++        .await?,
++        2
++    );
++    let claim = claim_next_ordered(&fixture.pool, &owner, &fixture.task_prefix, None).await?;
++    assert_eq!(
++        claim.task.as_ref().map(|task| task.key.as_str()),
++        Some(second.as_str()),
++    );
++
++    sqlx::query("DELETE FROM task_transition_audit WHERE team_id=$1")
++        .bind(fixture.team_id)
++        .execute(&fixture.pool)
++        .await?;
++    cleanup(fixture).await?;
++    Ok(())
++}
