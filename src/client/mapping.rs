@@ -58,6 +58,45 @@ pub struct Defaults {
     pub channel: Option<String>,
 }
 
+#[cfg(test)]
+mod checked_completion_tests {
+    use super::checked_completion_call;
+    use crate::store::tasks::CompleteTaskCheckedInput;
+    use serde_json::json;
+
+    #[test]
+    fn checked_mapping_preserves_the_complete_binding_without_legacy_fallback() {
+        let serialized = json!({
+            "key": "original-task", "attempt_id": "attempt", "session_id": "crew-session",
+            "owner_agent_id": "00000000-0000-0000-0000-000000000001",
+            "owner_session": "implementer",
+            "owner_session_id": "00000000-0000-0000-0000-000000000002",
+            "owner_epoch": 1, "owner_generation": 1, "source_sha256": "a".repeat(64),
+            "result": "abc",
+            "result_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "reviewer_session": "reviewer",
+            "reviewer_session_id": "00000000-0000-0000-0000-000000000003",
+            "reviewer_evidence_note_key": "review-note",
+            "reviewer_evidence_sha256": "b".repeat(64),
+            "reducer_actor_id": "00000000-0000-0000-0000-000000000004"
+        });
+        let input: CompleteTaskCheckedInput = serde_json::from_value(serialized.clone()).unwrap();
+        let (tool, arguments) = checked_completion_call(&input).unwrap();
+        assert_eq!(tool, "complete_task_checked");
+        assert_eq!(arguments, serialized);
+        let mut invalid = input;
+        invalid.result = "not the reviewed result".to_owned();
+        assert!(checked_completion_call(&invalid).is_err());
+    }
+}
+
+pub fn checked_completion_call(
+    input: &crate::store::tasks::CompleteTaskCheckedInput,
+) -> anyhow::Result<(&'static str, Value)> {
+    crate::store::tasks::validate_checked_completion(input)?;
+    Ok(("complete_task_checked", serde_json::to_value(input)?))
+}
+
 pub fn to_call(cmd: &ClientCmd) -> anyhow::Result<Option<(&'static str, Value)>> {
     to_call_with(cmd, &Defaults::default())
 }

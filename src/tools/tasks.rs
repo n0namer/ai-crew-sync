@@ -159,6 +159,8 @@ pub struct CompleteTaskArgs {
     pub result: Option<String>,
 }
 
+pub type CompleteTaskCheckedArgs = tasks::CompleteTaskCheckedInput;
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CancelTaskArgs {
     /// The task key to cancel.
@@ -319,6 +321,18 @@ impl Bus {
     }
 
     #[tool(
+        description = "Fail-closed checked completion preflight. Requires exact task/attempt/session binding, owner fence and SHA-256 evidence. Returns unsupported_proof until authoritative persisted QA and reducer authority are available; never falls back to legacy completion or marks DONE."
+    )]
+    async fn complete_task_checked(
+        &self,
+        ctx: RequestContext<rmcp::RoleServer>,
+        Parameters(args): Parameters<CompleteTaskCheckedArgs>,
+    ) -> Result<Json<tasks::CheckedCompletionOutcome>, ErrorData> {
+        let auth = auth_of(&ctx)?;
+        Ok(Json(tasks::complete_task_checked(&self.db, &auth, &args).await?))
+    }
+
+    #[tool(
         description = "Cancel an unfinished task with a durable reason. Refuses live claims held by another session, completed tasks, and tasks that would leave active dependents incorrectly unblocked. Repeating the exact request is idempotent."
     )]
     async fn cancel_task(
@@ -355,6 +369,20 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::{ListTasksArgs, search_query_from_args, validate_search_args};
+
+    #[test]
+    fn legacy_completion_dto_remains_key_and_optional_result() {
+        let minimal: super::CompleteTaskArgs =
+            serde_json::from_str(r#"{"key":"original-task"}"#).unwrap();
+        assert_eq!(minimal.key, "original-task");
+        assert!(minimal.result.is_none());
+        let populated: super::CompleteTaskArgs =
+            serde_json::from_str(r#"{"key":"original-task","result":"finished"}"#).unwrap();
+        assert_eq!(populated.result.as_deref(), Some("finished"));
+        assert!(serde_json::from_str::<super::CompleteTaskCheckedArgs>(
+            r#"{"key":"original-task","result":"finished"}"#,
+        ).is_err());
+    }
 
     #[test]
     fn legacy_list_arguments_default_pagination_filters() {

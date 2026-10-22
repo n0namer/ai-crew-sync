@@ -1319,6 +1319,192 @@ pub async fn release_task(pool: &PgPool, auth: &AuthCtx, key: &str) -> BusResult
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteTaskCheckedInput {
+    pub key: String,
+    pub attempt_id: String,
+    pub session_id: String,
+    #[schemars(with = "String")]
+    pub owner_agent_id: Uuid,
+    pub owner_session: String,
+    #[schemars(with = "String")]
+    pub owner_session_id: Uuid,
+    pub owner_epoch: i64,
+    pub owner_generation: i64,
+    pub source_sha256: String,
+    pub result: String,
+    pub result_sha256: String,
+    pub reviewer_session: String,
+    #[schemars(with = "String")]
+    pub reviewer_session_id: Uuid,
+    pub reviewer_evidence_note_key: String,
+    pub reviewer_evidence_sha256: String,
+    #[schemars(with = "String")]
+    pub reducer_actor_id: Uuid,
+}
+
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckedProofKind {
+    AttemptBinding,
+    SourceManifest,
+    OwnerSessionGeneration,
+    IndependentReview,
+    ReducerAuthority,
+    AuthenticatedReducerSession,
+    ClaimGeneration,
+}
+
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckedCompletionRejection {
+    WrongReducerActor,
+    NoLiveClaim,
+    WrongOwner,
+    StaleGeneration,
+    UnfinishedDependencies,
+}
+
+#[derive(Debug, serde::Serialize, schemars::JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum CheckedCompletionOutcome {
+    UnsupportedProof { missing: Vec<CheckedProofKind> },
+    Rejected { reason: CheckedCompletionRejection },
+}
+
+pub fn validate_checked_completion(input: &CompleteTaskCheckedInput) -> BusResult<()> {
+    use sha2::{Digest, Sha256};
+
+    if normalize_key(&input.key)? != input.key {
+        return Err(BusError::invalid("checked completion requires the exact original task key"));
+    }
+    for (field, value, limit) in [
+        ("attempt_id", input.attempt_id.as_str(), 256),
+        ("session_id", input.session_id.as_str(), 256),
+        ("reviewer_evidence_note_key", input.reviewer_evidence_note_key.as_str(), 128),
+    ] {
+        if value.is_empty() || value.len() > limit || value.trim() != value
+            || !value.is_ascii() || value.chars().any(char::is_control)
+        {
+            return Err(BusError::invalid(format!("{field} must be a bounded exact identifier")));
+        }
+    }
+    for (field, value) in [
+        ("owner_session", input.owner_session.as_str()),
+        ("reviewer_session", input.reviewer_session.as_str()),
+    ] {
+        if value.is_empty() || crate::auth::normalize_session(value).as_deref() != Ok(value) {
+            return Err(BusError::invalid(format!("{field} must be a canonical non-empty session")));
+        }
+    }
+    if input.owner_epoch <= 0 || input.owner_generation <= 0 {
+        return Err(BusError::invalid("owner epoch and generation must be positive"));
+    }
+    if [input.owner_agent_id, input.owner_session_id, input.reviewer_session_id,
+        input.reducer_actor_id].iter().any(Uuid::is_nil)
+    {
+        return Err(BusError::invalid("checked completion identities cannot be nil"));
+    }
+    if input.reviewer_session_id == input.owner_session_id
+        || input.reviewer_session == input.owner_session
+    {
+        return Err(BusError::invalid("an independent reviewer must not be the owner session"));
+    }
+    for (field, value) in [
+        ("source_sha256", input.source_sha256.as_str()),
+        ("result_sha256", input.result_sha256.as_str()),
+        ("reviewer_evidence_sha256", input.reviewer_evidence_sha256.as_str()),
+    ] {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_digit()
+            || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(BusError::invalid(format!("{field} must be lowercase SHA-256 hex")));
+        }
+    }
+    if input.result.is_empty() || input.result.len() > MAX_RESULT_BYTES {
+        return Err(BusError::invalid("checked result must contain 1 to 65536 UTF-8 bytes"));
+    }
+    if hex::encode(Sha256::digest(input.result.as_bytes())) != input.result_sha256 {
+        return Err(BusError::invalid("result_sha256 does not match the exact result bytes"));
+    }
+    Ok(())
+}
+
+pub async fn complete_task_checked(
+    pool: &PgPool,
+    auth: &AuthCtx,
+    input: &CompleteTaskCheckedInput,
+) -> BusResult<CheckedCompletionOutcome> {
+    validate_checked_completion(input)?;
+    if input.reducer_actor_id != auth.agent_id {
+        return Ok(CheckedCompletionOutcome::Rejected {
+            reason: CheckedCompletionRejection::WrongReducerActor,
+        });
+    }
+    let mut tx = pool.begin().await?;
+    super::sessions::guard(&mut tx, auth).await?;
+    let row: Option<(Uuid, String, Option<Uuid>, Option<String>, Option<i64>)> =
+        sqlx::query_as(
+            "SELECT t.id, t.status, t.claimed_by, t.claimed_session,
+                (to_jsonb(t)->>'completion_generation')::bigint
+             FROM tasks t WHERE t.team_id = $1 AND t.key = $2 FOR UPDATE",
+        )
+        .bind(auth.team_id)
+        .bind(&input.key)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((task_id, status, owner, owner_session, generation)) = row else {
+        return Err(BusError::not_found("checked completion task not found in this team"));
+    };
+    let generation = generation.filter(|current| *current > 0);
+    let live_claim: bool = sqlx::query_scalar(
+        "SELECT COALESCE(lease_expires_at > clock_timestamp(), false)
+         FROM tasks WHERE id = $1 AND team_id = $2",
+    )
+    .bind(task_id)
+    .bind(auth.team_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let rejection = if status != "claimed" || !live_claim {
+        Some(CheckedCompletionRejection::NoLiveClaim)
+    } else if owner != Some(input.owner_agent_id)
+        || owner_session.as_deref() != Some(input.owner_session.as_str())
+    {
+        Some(CheckedCompletionRejection::WrongOwner)
+    } else if generation.is_some_and(|current| current != input.owner_generation) {
+        Some(CheckedCompletionRejection::StaleGeneration)
+    } else {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM task_deps td
+             JOIN tasks prerequisite ON prerequisite.id = td.blocked_by_task_id
+             WHERE td.task_id = $1 AND prerequisite.status <> 'done')",
+        )
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        blocked.then_some(CheckedCompletionRejection::UnfinishedDependencies)
+    };
+    tx.rollback().await?;
+    if let Some(reason) = rejection {
+        return Ok(CheckedCompletionOutcome::Rejected { reason });
+    }
+    let mut missing = vec![
+        CheckedProofKind::AttemptBinding,
+        CheckedProofKind::SourceManifest,
+        CheckedProofKind::OwnerSessionGeneration,
+        CheckedProofKind::IndependentReview,
+        CheckedProofKind::ReducerAuthority,
+    ];
+    if auth.session_id.is_none() || auth.session_epoch.is_none() {
+        missing.push(CheckedProofKind::AuthenticatedReducerSession);
+    }
+    if generation.is_none() {
+        missing.push(CheckedProofKind::ClaimGeneration);
+    }
+    Ok(CheckedCompletionOutcome::UnsupportedProof { missing })
+}
+
 pub async fn complete_task(
     pool: &PgPool,
     auth: &AuthCtx,
